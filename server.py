@@ -14,6 +14,7 @@ und HTTPS übernimmt nginx davor.
 """
 
 import argparse
+import calendar
 import json
 import mimetypes
 import os
@@ -22,7 +23,11 @@ import sqlite3
 import sys
 import threading
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from email.message import EmailMessage
+import smtplib
+import ssl
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -79,6 +84,30 @@ CREATE TABLE IF NOT EXISTS recurring (
     note     TEXT NOT NULL DEFAULT '',
     active   INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS subs (
+    id           INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL,
+    provider     TEXT NOT NULL DEFAULT 'other',  -- Schlüssel aus der Anbieterliste der Oberfläche
+    url          TEXT NOT NULL DEFAULT '',       -- Seite zum Verwalten/Kündigen
+    amount       INTEGER NOT NULL,               -- Cent pro Abbuchung
+    interval     INTEGER NOT NULL DEFAULT 1,     -- alle n Monate
+    next_due     TEXT NOT NULL,                  -- nächste Abbuchung (wird automatisch weitergezählt)
+    note         TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
+    remind_mode  TEXT NOT NULL DEFAULT 'none' CHECK (remind_mode IN ('none', 'before', 'date')),
+    remind_days  INTEGER NOT NULL DEFAULT 7,     -- bei 'before': Tage vor der Abbuchung
+    remind_date  TEXT,                           -- bei 'date': fester Tag
+    ch_page      INTEGER NOT NULL DEFAULT 1,     -- Hinweis auf der Seite
+    ch_browser   INTEGER NOT NULL DEFAULT 0,     -- Browser-Benachrichtigung
+    ch_email     INTEGER NOT NULL DEFAULT 0,     -- E-Mail
+    ack_key      TEXT NOT NULL DEFAULT '',       -- welche Erinnerung schon erledigt ist
+    snooze_until TEXT,                           -- später erinnern
+    email_key    TEXT NOT NULL DEFAULT ''        -- welche Erinnerung schon gemailt wurde
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -127,7 +156,22 @@ def all_data(con):
         "pots": rows(con, "SELECT * FROM pots ORDER BY name"),
         "pot_tx": rows(con, "SELECT * FROM pot_tx ORDER BY date, id"),
         "recurring": rows(con, "SELECT * FROM recurring ORDER BY kind DESC, grp, name"),
+        "subs": rows(con, "SELECT * FROM subs ORDER BY name"),
+        "settings": {
+            "notify_email": get_setting(con, "notify_email", ""),
+            "smtp_configured": smtp_config() is not None,
+            "today": date.today().isoformat(),
+        },
     }
+
+
+def get_setting(con, key, default=None):
+    row = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(con, key, value):
+    con.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
 
 # ---------------------------------------------------------------- Prüfungen
@@ -379,6 +423,220 @@ def h_recurring_delete(con, b, id_):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- Abos
+
+URL_RE = re.compile(r"^https?://[^\s]+$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def sub_fields(b, c=None):
+    c = c or {}
+    g = lambda k, d=None: b.get(k, c.get(k, d))  # noqa: E731
+    interval = g("interval", 1)
+    if interval not in (1, 2, 3, 6, 12, 24):
+        raise ApiError(400, "Rhythmus ungültig")
+    url = v_text(g("url", ""), "Webseite", required=False, max_len=500)
+    if url and not URL_RE.match(url):
+        raise ApiError(400, "Die Webseite muss mit http:// oder https:// beginnen")
+    status = g("status", "active")
+    if status not in ("active", "cancelled"):
+        raise ApiError(400, "Status ungültig")
+    mode = g("remind_mode", "none")
+    if mode not in ("none", "before", "date"):
+        raise ApiError(400, "Erinnerungsart ungültig")
+    days = g("remind_days", 7)
+    if isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 365:
+        raise ApiError(400, "Tage vor der Abbuchung: 0 bis 365")
+    rdate = g("remind_date")
+    if mode == "date":
+        rdate = v_date(rdate, "Erinnerungsdatum")
+    elif rdate:
+        rdate = v_date(rdate, "Erinnerungsdatum")
+    else:
+        rdate = None
+    snooze = g("snooze_until")
+    snooze = v_date(snooze, "Später erinnern") if snooze else None
+    provider = g("provider", "other")
+    if not isinstance(provider, str) or not re.match(r"^[a-z0-9-]{1,30}$", provider):
+        raise ApiError(400, "Anbieter ungültig")
+    return (
+        v_text(g("name"), "Name", max_len=80), provider, url,
+        v_cents(g("amount"), allow_zero=True), interval, v_date(g("next_due"), "Nächste Abbuchung"),
+        v_text(g("note", ""), "Notiz", required=False, max_len=300), status,
+        mode, days, rdate,
+        1 if g("ch_page", 1) else 0, 1 if g("ch_browser", 0) else 0, 1 if g("ch_email", 0) else 0,
+        v_text(g("ack_key", ""), "ack", required=False, max_len=40), snooze,
+    )
+
+
+SUB_COLS = "name, provider, url, amount, interval, next_due, note, status, remind_mode, remind_days, remind_date, ch_page, ch_browser, ch_email, ack_key, snooze_until"
+
+
+def h_sub_create(con, b):
+    cur = con.execute(f"INSERT INTO subs ({SUB_COLS}) VALUES ({','.join('?' * 16)})", sub_fields(b))
+    return need(con, "subs", cur.lastrowid)
+
+
+def h_sub_update(con, b, id_):
+    c = need(con, "subs", id_)
+    sets = ", ".join(f"{k.strip()}=?" for k in SUB_COLS.split(","))
+    con.execute(f"UPDATE subs SET {sets} WHERE id=?", (*sub_fields(b, c), id_))
+    return need(con, "subs", id_)
+
+
+def h_sub_delete(con, b, id_):
+    need(con, "subs", id_)
+    con.execute("DELETE FROM subs WHERE id=?", (id_,))
+    return {"ok": True}
+
+
+def h_settings(con, b):
+    if "notify_email" in b:
+        mail = v_text(b.get("notify_email"), "E-Mail", required=False, max_len=200)
+        if mail and not EMAIL_RE.match(mail):
+            raise ApiError(400, "Das sieht nicht wie eine E-Mail-Adresse aus")
+        set_setting(con, "notify_email", mail)
+    return {"ok": True, "notify_email": get_setting(con, "notify_email", "")}
+
+
+# --- Erinnerungen (gleiche Regeln wie in der Oberfläche, static/subs.js)
+
+def add_months(d, n):
+    y, m = divmod(d.month - 1 + n, 12)
+    y += d.year
+    return date(y, m + 1, min(d.day, calendar.monthrange(y, m + 1)[1]))
+
+
+def effective_due(sub, today):
+    """Nächste Abbuchung ab heute – zählt das gespeicherte Datum im Abo-Rhythmus weiter."""
+    base = date.fromisoformat(sub["next_due"])
+    d, k = base, 0
+    while d < today and k < 2000:
+        k += 1
+        d = add_months(base, k * sub["interval"])
+    return d
+
+
+def active_reminder(sub, today):
+    if sub["status"] != "active" or sub["remind_mode"] == "none":
+        return None
+    due = effective_due(sub, today)
+    if sub["remind_mode"] == "before":
+        trigger, key = due - timedelta(days=sub["remind_days"]), "b" + due.isoformat()
+    else:
+        if not sub["remind_date"]:
+            return None
+        trigger, key = date.fromisoformat(sub["remind_date"]), "d" + sub["remind_date"]
+    if today < trigger or sub["ack_key"] == key:
+        return None
+    if sub["snooze_until"] and today < date.fromisoformat(sub["snooze_until"]):
+        return None
+    return {"key": key, "trigger": trigger, "due": due}
+
+
+# --- E-Mail
+
+def smtp_config():
+    host = os.environ.get("HB_SMTP_HOST")
+    if not host:
+        return None
+    port = int(os.environ.get("HB_SMTP_PORT", "465"))
+    user = os.environ.get("HB_SMTP_USER", "")
+    return {
+        "host": host, "port": port, "user": user,
+        "password": os.environ.get("HB_SMTP_PASSWORD", ""),
+        "sender": os.environ.get("HB_SMTP_FROM", user),
+        # ssl (Port 465), starttls (Port 587) oder none (nur für lokale Tests)
+        "security": os.environ.get("HB_SMTP_SECURITY", {465: "ssl", 587: "starttls"}.get(port, "none")),
+    }
+
+
+def send_mail(to, subject, body):
+    cfg = smtp_config()
+    if not cfg:
+        raise ApiError(400, "Auf dem Server ist noch kein E-Mail-Versand eingerichtet (siehe README)")
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = subject, cfg["sender"], to
+    msg.set_content(body)
+    ctx = ssl.create_default_context()
+    try:
+        if cfg["security"] == "ssl":
+            conn = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=20, context=ctx)
+        else:
+            conn = smtplib.SMTP(cfg["host"], cfg["port"], timeout=20)
+        with conn as s:
+            if cfg["security"] == "starttls":
+                s.starttls(context=ctx)
+            if cfg["user"]:
+                s.login(cfg["user"], cfg["password"])
+            s.send_message(msg)
+    except (smtplib.SMTPException, OSError) as e:
+        raise ApiError(502, f"E-Mail konnte nicht gesendet werden: {e}")
+
+
+def euro_text(cents):
+    s = f"{abs(cents) / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return ("-" if cents < 0 else "") + s + " €"
+
+
+def check_reminder_mails():
+    """Schickt für fällige Erinnerungen mit E-Mail-Kanal eine Sammelmail (jede Erinnerung nur einmal)."""
+    if not smtp_config():
+        return 0
+    today = date.today()
+    with WRITE_LOCK, db() as con:
+        to = get_setting(con, "notify_email", "") or os.environ.get("HB_NOTIFY_TO", "")
+        if not to:
+            return 0
+        due = []
+        for sub in rows(con, "SELECT * FROM subs WHERE ch_email=1 AND status='active'"):
+            r = active_reminder(sub, today)
+            if r:
+                mark = r["key"] + "|" + (sub["snooze_until"] or "")
+                if sub["email_key"] != mark:
+                    due.append((sub, r, mark))
+        if not due:
+            return 0
+        base = os.environ.get("HB_BASE_URL", "").rstrip("/")
+        lines = ["Servus!", "", "Diese Abos solltest Du Dir anschauen:", ""]
+        for sub, r, _ in due:
+            lines.append(f"• {sub['name']} – {euro_text(sub['amount'])}, nächste Abbuchung am {r['due'].strftime('%d.%m.%Y')}")
+            if sub["note"]:
+                lines.append(f"  {sub['note']}")
+            if sub["url"]:
+                lines.append(f"  Kündigen/verwalten: {sub['url']}")
+            lines.append("")
+        if base:
+            lines.append(f"Zur Übersicht: {base}/#monat")
+        lines.append("")
+        lines.append("– Dein Haushaltsbuch")
+        subject = "Abo-Erinnerung: " + ", ".join(s["name"] for s, _, _ in due)
+        send_mail(to, subject[:150], "\n".join(lines))
+        for sub, _, mark in due:
+            con.execute("UPDATE subs SET email_key=? WHERE id=?", (mark, sub["id"]))
+        return len(due)
+
+
+def reminder_loop():
+    while True:
+        try:
+            n = check_reminder_mails()
+            if n:
+                sys.stderr.write(f"Abo-Erinnerung per E-Mail verschickt ({n})\n")
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"Erinnerungs-E-Mail fehlgeschlagen: {e!r}\n")
+        time.sleep(1800)
+
+
+def test_email():
+    with db() as con:
+        to = get_setting(con, "notify_email", "") or os.environ.get("HB_NOTIFY_TO", "")
+    if not to:
+        raise ApiError(400, "Bitte zuerst eine E-Mail-Adresse eintragen und speichern")
+    send_mail(to, "Haushaltsbuch: Test-E-Mail", "Servus!\n\nDer E-Mail-Versand für Abo-Erinnerungen funktioniert. 🎉\n\n– Dein Haushaltsbuch")
+    return {"ok": True, "to": to}
+
+
 # ---------------------------------------------------------------- Export/Import
 
 def export_data(con):
@@ -399,6 +657,8 @@ def export_data(con):
             for t in rows(con, "SELECT * FROM pot_tx ORDER BY date, id")
         ],
         "recurring": rows(con, "SELECT kind, name, amount, interval, grp, variable, note, active FROM recurring"),
+        "subs": rows(con, f"SELECT {SUB_COLS} FROM subs ORDER BY name"),
+        "settings": {"notify_email": get_setting(con, "notify_email", "")},
     }
 
 
@@ -444,6 +704,12 @@ def import_data(con, data):
             "INSERT INTO recurring (kind, name, amount, interval, grp, variable, note, active) VALUES (?,?,?,?,?,?,?,?)",
             recurring_fields(r),
         )
+    if "subs" in data:  # ältere Exportdateien ohne Abos lassen vorhandene Abos stehen
+        con.execute("DELETE FROM subs")
+        for sb in data.get("subs", []):
+            con.execute(f"INSERT INTO subs ({SUB_COLS}) VALUES ({','.join('?' * 16)})", sub_fields(sb))
+    if isinstance(data.get("settings"), dict) and "notify_email" in data["settings"]:
+        h_settings(con, {"notify_email": data["settings"]["notify_email"]})
     return {"ok": True, "expenses": len(data.get("expenses", [])), "categories": len(cat_ids)}
 
 
@@ -466,6 +732,10 @@ ROUTES = [
     ("POST", r"/api/recurring", h_recurring_create),
     ("PUT", r"/api/recurring/(\d+)", h_recurring_update),
     ("DELETE", r"/api/recurring/(\d+)", h_recurring_delete),
+    ("POST", r"/api/subs", h_sub_create),
+    ("PUT", r"/api/subs/(\d+)", h_sub_update),
+    ("DELETE", r"/api/subs/(\d+)", h_sub_delete),
+    ("PUT", r"/api/settings", h_settings),
     ("POST", r"/api/import", import_data),
 ]
 ROUTES = [(m, re.compile("^" + p + "$"), f) for m, p, f in ROUTES]
@@ -527,6 +797,8 @@ class Handler(BaseHTTPRequestHandler):
             if length > 20_000_000:
                 raise ApiError(413, "Anfrage zu groß")
             body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+            if method == "POST" and path == "/api/test-email":  # ohne Schreibsperre, SMTP kann dauern
+                return self.send_json(200, test_email())
             for m, pattern, fn in ROUTES:
                 match = pattern.match(path)
                 if m == method and match:
@@ -574,6 +846,7 @@ def main():
         print(f"Import fertig: {res['expenses']} Ausgaben, {res['categories']} Kategorien → {DB_PATH}")
         return
 
+    threading.Thread(target=reminder_loop, daemon=True, name="erinnerungen").start()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Haushaltsbuch läuft auf http://{args.host}:{args.port}  (Datenbank: {DB_PATH})")
     try:

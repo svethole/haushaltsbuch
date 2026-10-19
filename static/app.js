@@ -5,6 +5,10 @@ import {
   norm, api, toast, openDialog, confirmDialog, hideTip,
 } from './util.js';
 import { Combo } from './combo.js';
+import {
+  PROVIDERS, providerOf, shortLabel, CANCEL_TIP, SUB_INTERVALS, effectiveDue, activeReminder, monthlyOf, dueText, reminderLabel,
+  initAlerts, refreshAlerts, browserSupport, askBrowserPermission,
+} from './subs.js';
 import { columnChart, donutChart } from './charts.js';
 
 // ---------------------------------------------------------------- Konstanten
@@ -81,6 +85,13 @@ function render() {
   if (!S.data) return;
   main.innerHTML = '';
   ({ erfassen: viewErfassen, auswertung: viewAuswertung, toepfe: viewToepfe, monat: viewMonat, einstellungen: viewEinstellungen })[S.view]();
+  refreshAlerts();
+}
+
+/** Springt zum Abo in der Monatsübersicht (aus Warnleiste, Liste oder Browser-Benachrichtigung). */
+function openSub(id) {
+  S.focusSub = id;
+  if (S.view === 'monat') render(); else location.hash = '#monat';
 }
 
 function pageHead(title, sub, ...right) {
@@ -753,14 +764,18 @@ function viewMonat() {
   const fix = act.filter(r => r.kind === 'expense').reduce((a, r) => a + monthly(r), 0);
   const from = addDays(today(), -90);
   const daily = Math.round(S.data.expenses.filter(e => e.date > from && e.date <= today()).reduce((a, e) => a + e.amount, 0) / 90 * 30.44);
-  const rest = inc - fix - daily;
+  const subs = S.data.subs || [];
+  const activeSubs = subs.filter(x => x.status === 'active');
+  const subMonthly = activeSubs.reduce((a, x) => a + monthlyOf(x), 0);
+  const rest = inc - fix - subMonthly - daily;
 
   main.append(pageHead('Monatsüberblick', 'Regelmäßige Einnahmen und Fixkosten – als grober Überblick',
     h('button', { class: 'btn', onclick: () => recDialog(null, 'income') }, icon('plus'), 'Einnahme'),
-    h('button', { class: 'btn', onclick: () => recDialog(null, 'expense') }, icon('plus'), 'Fixkosten')));
+    h('button', { class: 'btn', onclick: () => recDialog(null, 'expense') }, icon('plus'), 'Fixkosten'),
+    h('button', { class: 'btn', onclick: () => subDialog(null) }, icon('plus'), 'Abo')));
   main.append(h('div', { class: 'balance-row' },
     kpi('Einnahmen pro Monat', euro(inc), `${act.filter(r => r.kind === 'income').length} Posten`),
-    kpi('Fixkosten pro Monat', euro(fix), `${act.filter(r => r.kind === 'expense').length} Posten`),
+    kpi('Fixkosten & Abos pro Monat', euro(fix + subMonthly), `${act.filter(r => r.kind === 'expense').length} Posten · davon Abos ${euro(subMonthly)}`),
     kpi('Tagesausgaben pro Monat', euro(daily), 'Ø der letzten 90 Tage'),
     inc ? kpi('Bleibt rechnerisch übrig', euro(rest), rest >= 0 ? h('span', { style: { color: 'var(--good)' } }, icon('check'), 'im Plus') : h('span', { style: { color: 'var(--danger)' } }, icon('info'), 'im Minus'))
       : kpi('Bleibt rechnerisch übrig', '–', 'erst Einnahmen eintragen')));
@@ -769,6 +784,72 @@ function viewMonat() {
       h('span', {}, 'Trag hier nach und nach ein, was regelmäßig rein- und rausgeht: Gehalt, Rente, Miete, Verträge, Abos, Raten. Bei schwankenden Beträgen (z. B. Gehalt mit Zulagen) einfach einen groben Mittelwert nehmen und „schwankt“ ankreuzen. Jährliche oder vierteljährliche Posten werden automatisch auf den Monat umgerechnet.')));
   }
   main.append(h('div', { class: 'grid-2' }, recCard('income', 'Einnahmen'), recCard('expense', 'Fixkosten')));
+  main.append(subsCard());
+  if (S.focusSub) {
+    const el = document.getElementById('sub-' + S.focusSub);
+    S.focusSub = null;
+    if (el) requestAnimationFrame(() => { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('flash'); });
+  }
+
+  function subsCard() {
+    const t = today();
+    const list = activeSubs.map(x => ({ x, due: effectiveDue(x, t), r: activeReminder(x, t) })).sort((a, b) => a.due.localeCompare(b.due));
+    const cancelled = subs.filter(x => x.status === 'cancelled');
+    const card = h('div', { class: 'card', id: 'abos', style: { marginTop: '16px' } },
+      h('div', { class: 'card-head' },
+        h('h2', {}, 'Abos', activeSubs.length ? h('span', { class: 'sub' }, `${euro(subMonthly)} / Monat · ${euro(subMonthly * 12)} / Jahr`) : null),
+        h('button', { class: 'btn small', onclick: () => subDialog(null) }, icon('plus'), 'Abo hinzufügen')));
+    if (!subs.length) {
+      card.append(h('div', { class: 'empty' }, 'Noch keine Abos eingetragen. Netflix, Spotify, App-Abos, Amazon Prime … alles, was regelmäßig abbucht und sich kündigen lässt.'));
+      return card;
+    }
+    const box = h('div', { class: 'sub-list' });
+    for (const { x, due, r } of list) box.append(subRow(x, due, r));
+    if (!list.length) box.append(h('div', { class: 'empty' }, 'Keine laufenden Abos.'));
+    card.append(box);
+    if (cancelled.length) {
+      const det = h('details', { class: 'sub-cancelled' }, h('summary', {}, `Gekündigt (${cancelled.length})`));
+      for (const x of cancelled) det.append(subRow(x, null, null));
+      card.append(det);
+    }
+    return card;
+  }
+
+  function subRow(x, due, r) {
+    const pv = providerOf(x.provider);
+    const t = today();
+    const meta = [];
+    if (due) meta.push(h('span', {}, `nächste Abbuchung ${fmtDate(due, { weekday: true })} · ${dueText(due, t)}`));
+    else meta.push(h('span', {}, 'gekündigt'));
+    meta.push(h('span', {}, SUB_INTERVALS[x.interval]));
+    if (x.provider !== 'other') meta.push(h('span', {}, shortLabel(pv)));
+    const remind = x.status === 'active' && x.remind_mode !== 'none'
+      ? h('span', { class: 'remind-chip' + (r ? ' due' : ''), title: 'Erinnerung' }, icon(r ? 'bell-ring' : 'bell'), reminderLabel(x)) : null;
+    const row = h('div', { class: 'sub-row' + (r ? ' alerting' : '') + (x.status === 'cancelled' ? ' inactive' : ''), id: 'sub-' + x.id },
+      catBadge({ color: pv.color, icon: pv.icon }),
+      h('div', { class: 'sub-main' },
+        h('div', { class: 'r-name' }, x.name, remind),
+        h('div', { class: 'r-meta' }, meta.reduce((acc, m, i) => (i ? [...acc, ' · ', m] : [m]), [])),
+        x.note ? h('div', { class: 'r-meta' }, x.note) : null),
+      h('div', { class: 'r-amt' }, euro(x.amount), x.interval > 1 ? h('small', {}, `≈ ${euro(monthlyOf(x))} / Monat`) : null),
+      h('div', { class: 'sub-actions' },
+        x.url ? h('a', { class: 'btn small', href: x.url, target: '_blank', rel: 'noopener noreferrer', title: x.url }, icon('external-link'), x.status === 'active' ? 'Kündigen' : 'Öffnen') : null,
+        h('button', { class: 'icon-btn', title: 'Bearbeiten', 'aria-label': 'Abo bearbeiten', onclick: () => subDialog(x) }, icon('pencil'))));
+    if (r) {
+      const upd = async (body, msg) => {
+        try { Object.assign(x, await api('PUT', `subs/${x.id}`, body)); render(); if (msg) toast(msg); }
+        catch (e) { toast(e.message, { error: true }); }
+      };
+      row.append(h('div', { class: 'sub-alert' },
+        icon('triangle-alert'),
+        h('span', {}, x.remind_mode === 'date' ? `${x.remind_date === t ? 'Erinnerung für heute' : `Erinnerung vom ${fmtDate(x.remind_date)}`} – kündigen oder behalten?` : `Die nächste Abbuchung ist ${dueText(r.due, t)} – kündigen oder behalten?`),
+        h('span', { class: 'sub-alert-actions' },
+          h('button', { class: 'btn small', onclick: () => upd({ status: 'cancelled' }, `„${x.name}“ als gekündigt markiert`) }, icon('circle-check'), 'Ist gekündigt'),
+          h('button', { class: 'btn small', onclick: () => upd({ ack_key: r.key, snooze_until: null }, 'Erinnerung erledigt') }, 'Behalten'),
+          h('button', { class: 'btn small', onclick: () => upd({ snooze_until: addDays(t, 3) }, 'Ich erinnere Dich in 3 Tagen nochmal') }, icon('alarm-clock'), 'In 3 Tagen'))));
+    }
+    return row;
+  }
 
   function recCard(kind, title) {
     const list = rec.filter(r => r.kind === kind);
@@ -794,6 +875,109 @@ function viewMonat() {
     card.append(box);
     return card;
   }
+}
+
+function subDialog(x) {
+  const isNew = !x;
+  const st = S.data.settings || {};
+  x = x || { name: '', provider: 'other', url: '', amount: 0, interval: 1, next_due: today(), note: '', status: 'active',
+    remind_mode: 'before', remind_days: 7, remind_date: null, ch_page: 1, ch_browser: 0, ch_email: 0 };
+  openDialog(isNew ? 'Neues Abo' : 'Abo bearbeiten', (form, close) => {
+    const prov = h('select', {}, PROVIDERS.map(p => h('option', { value: p.key, selected: p.key === x.provider }, p.label)));
+    const name = h('input', { type: 'text', value: x.name, maxlength: 80, placeholder: 'z. B. Netflix Standard' });
+    const amt = h('input', { type: 'text', inputmode: 'decimal', class: 'amount-input', value: x.amount ? plain(x.amount) : '', placeholder: '0,00' });
+    const intv = h('select', {}, Object.entries(SUB_INTERVALS).map(([k, v]) => h('option', { value: k, selected: Number(k) === x.interval }, v)));
+    const due = h('input', { type: 'date', value: x.next_due });
+    const url = h('input', { type: 'url', value: x.url, maxlength: 500, placeholder: 'https://…' });
+    const urlHint = h('div', { class: 'field-hint' });
+    const note = h('input', { type: 'text', value: x.note, maxlength: 300, placeholder: 'z. B. Probeabo bis 15.11., Kündigungsfrist 1 Monat' });
+    const mode = h('select', {},
+      h('option', { value: 'none', selected: x.remind_mode === 'none' }, 'Keine Erinnerung'),
+      h('option', { value: 'before', selected: x.remind_mode === 'before' }, 'Vor jeder Abbuchung'),
+      h('option', { value: 'date', selected: x.remind_mode === 'date' }, 'An einem bestimmten Tag'));
+    const days = h('input', { type: 'number', min: 0, max: 365, value: x.remind_days, style: { width: '90px' } });
+    const rdate = h('input', { type: 'date', value: x.remind_date || addDays(today(), 7) });
+    const chPage = h('input', { type: 'checkbox', checked: !!x.ch_page });
+    const chBrowser = h('input', { type: 'checkbox', checked: !!x.ch_browser });
+    const chEmail = h('input', { type: 'checkbox', checked: !!x.ch_email });
+    const cancelled = h('input', { type: 'checkbox', checked: x.status === 'cancelled' });
+    const hint = h('div', { class: 'field-hint' });
+    const daysRow = h('label', { class: 'check-row' }, days, 'Tage vor der Abbuchung erinnern');
+    const dateRow = h('label', { class: 'field' }, 'Erinnern am', rdate);
+    const chans = h('div', { class: 'chan-row' },
+      h('label', { class: 'check-row' }, chPage, 'Auf der Seite'),
+      h('label', { class: 'check-row' }, chBrowser, 'Im Browser'),
+      h('label', { class: 'check-row' }, chEmail, 'Per E-Mail'));
+    const chanHint = h('div', { class: 'field-hint' });
+    const drawMode = () => {
+      daysRow.classList.toggle('hidden', mode.value !== 'before');
+      dateRow.classList.toggle('hidden', mode.value !== 'date');
+      chans.classList.toggle('hidden', mode.value === 'none');
+      const notes = [];
+      if (mode.value !== 'none' && chBrowser.checked && (!browserSupport() || Notification.permission !== 'granted')) notes.push('Browser-Benachrichtigungen musst Du unter Einstellungen noch erlauben.');
+      if (mode.value !== 'none' && chEmail.checked && (!st.smtp_configured || !st.notify_email)) notes.push(st.smtp_configured ? 'Unter Einstellungen fehlt noch Deine E-Mail-Adresse.' : 'Der E-Mail-Versand ist auf dem Server noch nicht eingerichtet (siehe Einstellungen).');
+      chanHint.textContent = notes.join(' ');
+      chanHint.classList.toggle('hidden', mode.value === 'none' || !notes.length);
+    };
+    let lastPreset = providerOf(x.provider).url;
+    const drawProv = () => {
+      const p = providerOf(prov.value);
+      if (!url.value.trim() || url.value.trim() === lastPreset) url.value = p.url;
+      lastPreset = p.url;
+      name.placeholder = p.key === 'other' ? 'z. B. Fitnessstudio-App' : shortLabel(p);
+      urlHint.textContent = p.hint || (p.url ? '' : CANCEL_TIP);
+    };
+    prov.addEventListener('change', drawProv);
+    [mode, chBrowser, chEmail].forEach(el => el.addEventListener('change', drawMode));
+    drawProv(); drawMode();
+    form.append(
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Anbieter', prov), h('label', { class: 'field' }, 'Name', name)),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Betrag (€)', amt), h('label', { class: 'field' }, 'Rhythmus', intv)),
+      h('label', { class: 'field' }, 'Nächste Abbuchung', due),
+      h('label', { class: 'field' }, 'Webseite zum Kündigen / Verwalten', url, urlHint),
+      h('label', { class: 'field' }, 'Notiz', note),
+      h('fieldset', { class: 'remind-box' }, h('legend', {}, icon('bell'), 'Kündigungs-Erinnerung'),
+        mode, daysRow, dateRow, chans, chanHint),
+      h('label', { class: 'check-row' }, cancelled, 'Gekündigt (läuft nicht mehr, zählt nicht mit)'),
+      hint,
+      h('div', { class: 'dlg-actions' },
+        !isNew ? h('button', { type: 'button', class: 'btn danger left', onclick: del }, icon('trash-2'), 'Löschen') : null,
+        h('button', { type: 'button', class: 'btn', onclick: close }, 'Abbrechen'),
+        h('button', { type: 'submit', class: 'btn primary' }, 'Speichern')));
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const err = (msg, el) => { hint.className = 'field-hint error'; hint.textContent = msg; if (el) el.focus(); };
+      const c = amt.value.trim() ? parseAmount(amt.value) : 0;
+      if (c == null || c < 0) return err('Bitte einen gültigen Betrag eingeben.', amt);
+      if (!name.value.trim() && prov.value === 'other') return err('Bitte einen Namen eingeben.', name);
+      if (!due.value) return err('Bitte das Datum der nächsten Abbuchung eingeben.', due);
+      const d = parseInt(days.value, 10);
+      if (mode.value === 'before' && (isNaN(d) || d < 0 || d > 365)) return err('Tage vor der Abbuchung: 0 bis 365.', days);
+      if (mode.value === 'date' && !rdate.value) return err('Bitte ein Erinnerungsdatum wählen.', rdate);
+      const body = {
+        name: name.value.trim() || shortLabel(providerOf(prov.value)), provider: prov.value, url: url.value.trim(), amount: c,
+        interval: Number(intv.value), next_due: due.value, note: note.value.trim(),
+        status: cancelled.checked ? 'cancelled' : 'active',
+        remind_mode: mode.value, remind_days: isNaN(d) ? 7 : d, remind_date: mode.value === 'date' ? rdate.value : null,
+        ch_page: chPage.checked, ch_browser: chBrowser.checked, ch_email: chEmail.checked,
+      };
+      try {
+        if (isNew) S.data.subs.push(await api('POST', 'subs', body));
+        else Object.assign(x, await api('PUT', `subs/${x.id}`, body));
+        S.focusSub = isNew ? S.data.subs[S.data.subs.length - 1].id : x.id;
+        close(); render();
+      } catch (er) { err(er.message); }
+    });
+    async function del() {
+      close();
+      if (!(await confirmDialog('Abo löschen?', `„${x.name}“ löschen? Wenn Du es nur gekündigt hast, markier es besser als „gekündigt“ – dann bleibt es in der Liste.`))) return;
+      try {
+        await api('DELETE', `subs/${x.id}`);
+        S.data.subs = S.data.subs.filter(y => y.id !== x.id);
+        render();
+      } catch (er) { toast(er.message, { error: true }); }
+    }
+  });
 }
 
 function recDialog(r, kind) {
@@ -954,7 +1138,36 @@ function viewEinstellungen() {
       h('a', { class: 'btn', href: 'api/export', download: '' }, icon('download'), 'Sicherung herunterladen'),
       h('button', { class: 'btn', onclick: () => fileIn.click() }, icon('upload'), 'Sicherung einspielen'), fileIn));
 
-  main.append(h('div', { class: 'grid-2' }, h('div', { class: 'stack' }, catCard), h('div', { class: 'stack' }, shopCard, dataCard)));
+  main.append(h('div', { class: 'grid-2' }, h('div', { class: 'stack' }, catCard), h('div', { class: 'stack' }, notifyCard(), shopCard, dataCard)));
+}
+
+function notifyCard() {
+  const st = S.data.settings || {};
+  const card = h('div', { class: 'card', id: 'benachrichtigungen' }, h('h2', {}, icon('bell'), 'Abo-Erinnerungen'));
+  // Browser
+  const perm = !browserSupport() ? 'unsupported' : Notification.permission;
+  const permText = { granted: 'erlaubt ✓', denied: 'blockiert – bitte in den Website-Einstellungen des Browsers erlauben', default: 'noch nicht erlaubt', unsupported: 'werden von diesem Browser nicht unterstützt' }[perm];
+  card.append(h('div', { class: 'set-row' },
+    h('div', {}, h('div', { class: 'r-name' }, 'Browser-Benachrichtigungen'), h('div', { class: 'r-meta' }, permText)),
+    perm === 'default' ? h('button', { class: 'btn small', onclick: async () => { await askBrowserPermission(); render(); } }, 'Erlauben') : null));
+  card.append(h('p', { class: 'muted', style: { fontSize: '13px', margin: '4px 0 14px' } },
+    'Erscheinen, solange das Haushaltsbuch in einem Tab offen ist (auch im Hintergrund). Für Erinnerungen bei geschlossenem Browser nimm zusätzlich die E-Mail.'));
+  // E-Mail
+  const mail = h('input', { type: 'email', value: st.notify_email || '', placeholder: 'name@example.org', autocomplete: 'email' });
+  const status = h('div', { class: 'field-hint' + (st.smtp_configured ? '' : ' error') },
+    st.smtp_configured ? 'E-Mail-Versand ist auf dem Server eingerichtet. Geprüft wird alle 30 Minuten.' : 'Auf dem Server ist der E-Mail-Versand noch nicht eingerichtet (README → „E-Mail-Erinnerungen“).');
+  const save = h('button', { class: 'btn small', onclick: async () => {
+    try { const r = await api('PUT', 'settings', { notify_email: mail.value.trim() }); S.data.settings.notify_email = r.notify_email; toast('E-Mail-Adresse gespeichert'); }
+    catch (e) { toast(e.message, { error: true }); }
+  } }, 'Speichern');
+  const test = h('button', { class: 'btn small', disabled: st.smtp_configured ? null : true, onclick: async () => {
+    test.disabled = true;
+    try { const r = await api('POST', 'test-email', {}); toast(`Test-E-Mail an ${r.to} verschickt`); }
+    catch (e) { toast(e.message, { error: true, ms: 8000 }); }
+    finally { test.disabled = false; }
+  } }, icon('mail-check'), 'Test-E-Mail');
+  card.append(h('label', { class: 'field' }, 'E-Mail-Adresse für Erinnerungen', h('div', { class: 'inline-form' }, mail, save, test), status));
+  return card;
 }
 
 function renameShop(old) {
@@ -1002,6 +1215,17 @@ async function load() {
   indexData();
   render();
 }
+
+initAlerts({ getSubs: () => (S.data && S.data.subs) || [], openSub });
+// Alle 30 Minuten neu laden: neue Erinnerungen, Änderungen von anderen Geräten
+setInterval(async () => {
+  try {
+    const fresh = await api('GET', 'data');
+    const dlgOpen = document.getElementById('dialog').open;
+    S.data.subs = fresh.subs; S.data.settings = fresh.settings;
+    if (!dlgOpen && S.view === 'monat') render(); else refreshAlerts();
+  } catch (e) { /* offline – beim nächsten Mal */ }
+}, 30 * 60 * 1000);
 
 document.querySelectorAll('[data-icon]').forEach(el => el.classList.contains('brand-mark') ? el.append(icon(el.dataset.icon)) : el.replaceWith(icon(el.dataset.icon)));
 drawTheme();

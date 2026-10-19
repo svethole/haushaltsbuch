@@ -9,6 +9,9 @@ DynamicUser=yes
 # Datenbank liegt in /var/lib/haushaltsbuch (wird automatisch angelegt)
 StateDirectory=haushaltsbuch
 WorkingDirectory=/var/www/haushaltsbuch
+# Zeitzone für die Erinnerungen; Zugangsdaten für den E-Mail-Versand (optional, siehe README)
+Environment=TZ=Europe/Berlin
+EnvironmentFile=-/etc/haushaltsbuch.env
 ExecStart=/usr/bin/python3 /var/www/haushaltsbuch/server.py --host 127.0.0.1 --port 8085 --db /var/lib/haushaltsbuch/haushaltsbuch.db
 Restart=on-failure
 RestartSec=3

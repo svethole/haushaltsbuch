@@ -7,6 +7,7 @@ Eine kleine, selbst gehostete Web-App für das tägliche Haushaltsbuch: Ausgaben
 - **Feste Kategorien** mit eigener Farbe und eigenem Symbol, die überall gleich aussehen. Kategorien und Geschäfte lassen sich umbenennen und zusammenlegen.
 - **Spartöpfe** mit Ein- und Auszahlungen und optionalem Sparziel.
 - **Monatsüberblick** über regelmäßige Einnahmen und Fixkosten (monatlich, vierteljährlich, jährlich …).
+- **Abos** mit Link zur Kündigungsseite (Vorlagen für Google Play, Apple, Amazon, Netflix, Spotify u. v. m.), nächster Abbuchung und **Kündigungs-Erinnerungen**: als rote Leiste auf der Seite, als Browser-Benachrichtigung und per E-Mail.
 - Heller und dunkler Modus, funktioniert auch am Handy.
 
 Technik: Python 3 (nur Standardbibliothek) + SQLite, Oberfläche in reinem HTML/CSS/JavaScript. Keine Pakete, kein Build-Schritt. Symbole: [Lucide](https://lucide.dev) (ISC-Lizenz).
@@ -101,6 +102,22 @@ crontab -e
 
 Die Sicherungen landen in `/var/backups/haushaltsbuch/` und werden 60 Tage aufbewahrt. Zusätzlich kann man in der App jederzeit unter **Einstellungen** eine Sicherung als JSON-Datei herunterladen.
 
+### 8. E-Mail-Erinnerungen für Abos (optional)
+
+Damit der Server Abo-Erinnerungen per E-Mail schicken kann, braucht er Zugangsdaten zu einem Postausgangsserver. Die kommen in eine eigene Datei, die nur root lesen kann – nie ins Repository:
+
+```sh
+cp /var/www/haushaltsbuch/deploy/haushaltsbuch.env.example /etc/haushaltsbuch.env
+chmod 600 /etc/haushaltsbuch.env
+nano /etc/haushaltsbuch.env          # Zugangsdaten eintragen
+cp /var/www/haushaltsbuch/deploy/haushaltsbuch.service /etc/systemd/system/   # neue Fassung mit EnvironmentFile
+systemctl daemon-reload && systemctl restart haushaltsbuch
+```
+
+Bei Fastmail: Server `smtp.fastmail.com`, Port `465`, als Passwort ein eigenes **App-Passwort** (nicht das normale Login-Passwort). Danach in der App unter **Einstellungen → Abo-Erinnerungen** die Empfänger-Adresse eintragen und auf **Test-E-Mail** klicken.
+
+Der Server prüft alle 30 Minuten, ob Erinnerungen fällig sind, und schickt pro Erinnerung genau eine Sammelmail. Browser-Benachrichtigungen erscheinen nur, solange die Seite in einem Tab geöffnet ist – für alles andere ist die E-Mail da.
+
 ### Aktualisieren
 
 ```sh
@@ -131,3 +148,6 @@ Alle Antworten sind JSON, Beträge immer in Cent.
 | POST | `/api/shops/rename` | Geschäft umbenennen/zusammenlegen (`{"from", "to"}`) |
 | POST/PUT/DELETE | `/api/pots[/id]`, `/api/pot_tx[/id]` | Spartöpfe und deren Buchungen |
 | POST/PUT/DELETE | `/api/recurring[/id]` | regelmäßige Einnahmen und Fixkosten |
+| POST/PUT/DELETE | `/api/subs[/id]` | Abos samt Erinnerungseinstellungen |
+| PUT | `/api/settings` | Einstellungen (E-Mail-Adresse für Erinnerungen) |
+| POST | `/api/test-email` | Test-E-Mail verschicken |
