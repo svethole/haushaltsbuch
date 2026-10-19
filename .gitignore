@@ -1,0 +1,10 @@
+# Echte Daten gehören nie ins Repo
+data/
+*.db
+*.db-wal
+*.db-shm
+*.json
+!package.json
+*.ods
+*.csv
+__pycache__/

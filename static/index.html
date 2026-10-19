@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Haushaltsbuch</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="theme.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <nav class="sidebar" aria-label="Hauptnavigation">
+      <div class="brand">
+        <span class="brand-mark" data-icon="wallet"></span>
+        <span class="brand-name">Haushaltsbuch</span>
+      </div>
+      <a href="#erfassen" data-view="erfassen"><span data-icon="pen-line"></span><span>Erfassen</span></a>
+      <a href="#auswertung" data-view="auswertung"><span data-icon="chart-column"></span><span class="nav-long">Auswertung</span><span class="nav-short">Auswerten</span></a>
+      <a href="#toepfe" data-view="toepfe"><span data-icon="piggy-bank"></span><span>Spartöpfe</span></a>
+      <a href="#monat" data-view="monat"><span data-icon="repeat"></span><span class="nav-long">Monatsüberblick</span><span class="nav-short">Monat</span></a>
+      <a href="#einstellungen" data-view="einstellungen"><span data-icon="settings"></span><span class="nav-long">Einstellungen</span><span class="nav-short">Optionen</span></a>
+      <div class="sidebar-foot">
+        <button type="button" class="theme-toggle" id="themeToggle" title="Farbschema wechseln"></button>
+      </div>
+    </nav>
+    <main id="main" tabindex="-1"></main>
+  </div>
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <dialog id="dialog"></dialog>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
