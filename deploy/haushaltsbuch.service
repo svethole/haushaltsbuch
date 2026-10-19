@@ -8,8 +8,8 @@ Type=simple
 DynamicUser=yes
 # Datenbank liegt in /var/lib/haushaltsbuch (wird automatisch angelegt)
 StateDirectory=haushaltsbuch
-WorkingDirectory=/opt/haushaltsbuch
-ExecStart=/usr/bin/python3 /opt/haushaltsbuch/server.py --host 127.0.0.1 --port 8085 --db /var/lib/haushaltsbuch/haushaltsbuch.db
+WorkingDirectory=/var/www/haushaltsbuch
+ExecStart=/usr/bin/python3 /var/www/haushaltsbuch/server.py --host 127.0.0.1 --port 8085 --db /var/lib/haushaltsbuch/haushaltsbuch.db
 Restart=on-failure
 RestartSec=3
 

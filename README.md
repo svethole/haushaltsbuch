@@ -48,9 +48,9 @@ dig +short haushaltsbuch.svetho.net
 
 ```sh
 apt install git python3 nginx certbot python3-certbot-nginx apache2-utils
-git clone https://github.com/svethole/haushaltsbuch.git /opt/haushaltsbuch
+git clone https://github.com/svethole/haushaltsbuch.git /var/www/haushaltsbuch
 
-cp /opt/haushaltsbuch/deploy/haushaltsbuch.service /etc/systemd/system/
+cp /var/www/haushaltsbuch/deploy/haushaltsbuch.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now haushaltsbuch
 systemctl status haushaltsbuch          # sollte "active (running)" zeigen
@@ -71,7 +71,7 @@ chmod 640 /etc/nginx/htpasswd-haushaltsbuch
 ### 4. nginx einrichten
 
 ```sh
-cp /opt/haushaltsbuch/deploy/nginx-haushaltsbuch.conf /etc/nginx/sites-available/haushaltsbuch
+cp /var/www/haushaltsbuch/deploy/nginx-haushaltsbuch.conf /etc/nginx/sites-available/haushaltsbuch
 ln -s /etc/nginx/sites-available/haushaltsbuch /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 ```
@@ -93,10 +93,10 @@ Im Browser unter **Einstellungen → Datensicherung → Sicherung einspielen** d
 ### 7. Tägliche Sicherung
 
 ```sh
-chmod +x /opt/haushaltsbuch/deploy/backup.sh
+chmod +x /var/www/haushaltsbuch/deploy/backup.sh
 crontab -e
 # Zeile ergänzen:
-15 3 * * * /opt/haushaltsbuch/deploy/backup.sh
+15 3 * * * /var/www/haushaltsbuch/deploy/backup.sh
 ```
 
 Die Sicherungen landen in `/var/backups/haushaltsbuch/` und werden 60 Tage aufbewahrt. Zusätzlich kann man in der App jederzeit unter **Einstellungen** eine Sicherung als JSON-Datei herunterladen.
@@ -104,7 +104,7 @@ Die Sicherungen landen in `/var/backups/haushaltsbuch/` und werden 60 Tage aufbe
 ### Aktualisieren
 
 ```sh
-cd /opt/haushaltsbuch && git pull && systemctl restart haushaltsbuch
+cd /var/www/haushaltsbuch && git pull && systemctl restart haushaltsbuch
 ```
 
 ### Fehlersuche

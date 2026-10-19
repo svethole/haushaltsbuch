@@ -1,6 +1,6 @@
 #!/bin/sh
 # Tägliche Sicherung der Haushaltsbuch-Datenbank, behält die letzten 60 Tage.
-# Einrichten (als root):  crontab -e  →  15 3 * * * /opt/haushaltsbuch/deploy/backup.sh
+# Einrichten (als root):  crontab -e  →  15 3 * * * /var/www/haushaltsbuch/deploy/backup.sh
 set -eu
 SRC=/var/lib/haushaltsbuch/haushaltsbuch.db
 DEST=/var/backups/haushaltsbuch
