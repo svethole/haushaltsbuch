@@ -27,22 +27,28 @@ function tipRows(parts, total, limit = 4) {
 
 /**
  * Säulendiagramm.
- * buckets: [{label, short, total, parts:[{cat, amount}], future?}]
+ * buckets: [{label, short, total, exTotal?, ex?, exText?, parts:[{cat, amount}], future?}]
+ *   exTotal = Ausgaben an ausgenommenen Tagen (werden grau gezeichnet), ex = Anteil ausgenommener Tage (Schraffur)
+ * onSelect(i0, i1, clientX, clientY): Balken angeklickt oder mit gedrückter Maustaste markiert
  */
-export function columnChart(container, { buckets, avg, avgLabel }) {
+export function columnChart(container, { buckets, avg, avgLabel, onSelect }) {
   container.innerHTML = '';
   const W = Math.max(280, container.clientWidth || 600);
   const H = 250;
   const m = { t: 14, r: 8, b: 26, l: 56 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
-  const max = Math.max(...buckets.map(b => b.total), avg || 0, 1);
+  const max = Math.max(...buckets.map(b => b.total + (b.exTotal || 0)), avg || 0, 1);
   const step = niceStep(max);
   const top = Math.ceil(max / step) * step;
   const y = v => m.t + ih - (v / top) * ih;
   const band = iw / buckets.length;
   const bw = Math.max(2, Math.min(34, band * 0.68));
+  const colPath = (x, y0, y1) => {
+    const r = Math.min(4, bw / 2, y0 - y1);
+    return `M${x},${y0} V${y1 + r} Q${x},${y1} ${x + r},${y1} H${x + bw - r} Q${x + bw},${y1} ${x + bw},${y1 + r} V${y0} Z`;
+  };
 
-  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': 'Ausgaben im Zeitverlauf' });
+  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': 'Ausgaben im Zeitverlauf', class: onSelect ? 'selectable' : '' });
   // Schraffur für Tage, die nicht in die Statistik eingehen
   const pid = 'hatch' + Math.random().toString(36).slice(2, 8);
   const defs = s('defs');
@@ -60,18 +66,20 @@ export function columnChart(container, { buckets, avg, avgLabel }) {
     svg.append(t);
   }
   svg.append(s('line', { x1: m.l, x2: W - m.r, y1: y(0), y2: y(0), class: 'baseline' }));
+  const sel = s('rect', { y: m.t - 4, height: ih + 4, rx: 6, class: 'sel-band', visibility: 'hidden' });
+  svg.append(sel);
 
   const labelEvery = Math.max(1, Math.ceil(buckets.length / Math.max(1, Math.floor(iw / 46))));
   const bars = [];
   buckets.forEach((b, i) => {
-    const cx = m.l + band * i + band / 2;
-    let bar = null;
-    if (b.total > 0) {
-      const x = cx - bw / 2, y0 = y(0), y1 = y(b.total), r = Math.min(4, bw / 2, y0 - y1);
-      bar = s('path', { class: 'bar', d: `M${x},${y0} V${y1 + r} Q${x},${y1} ${x + r},${y1} H${x + bw - r} Q${x + bw},${y1} ${x + bw},${y1 + r} V${y0} Z` });
-      svg.append(bar);
-    }
-    bars.push(bar);
+    const cx = m.l + band * i + band / 2, x = cx - bw / 2;
+    const g = s('g', { class: 'col' });
+    const all = b.total + (b.exTotal || 0);
+    // ausgegraut: gebuchte Ausgaben an Tagen, die nicht mitzählen (oben auf dem gezählten Teil)
+    if (b.exTotal > 0) g.append(s('path', { class: 'bar-ex', d: colPath(x, y(0), y(all)) }));
+    if (b.total > 0) g.append(s('path', { class: 'bar', d: b.exTotal > 0 ? `M${x},${y(0)} V${y(b.total)} H${x + bw} V${y(0)} Z` : colPath(x, y(0), y(b.total)) }));
+    svg.append(g);
+    bars.push(all > 0 ? g : null);
     if (i % labelEvery === 0) {
       const t = s('text', { x: cx, y: H - 8, 'text-anchor': 'middle', class: 'axis-label' });
       t.textContent = b.short;
@@ -79,10 +87,13 @@ export function columnChart(container, { buckets, avg, avgLabel }) {
     }
     const hit = s('rect', { x: m.l + band * i, y: m.t, width: band, height: ih, class: 'hit' });
     hit.addEventListener('mousemove', e => {
+      if (drag) return;
       bars.forEach((o, j) => o && o.classList.toggle('dim', j !== i));
-      showTip(`<div class="t-title">${esc(b.label)}</div><div class="t-total">${euro(b.total)}</div>${tipRows(b.parts, b.total)}${b.exText ? `<div class="t-ex">${esc(b.exText)}</div>` : ''}`, e.clientX, e.clientY);
+      const exRow = b.exTotal > 0 ? `<div class="t-row"><span class="swatch" style="background:var(--axis)"></span><span>nicht gezählt</span><span class="v">${euro(b.exTotal)}</span></div>` : '';
+      const hint = onSelect ? '<div class="t-hint">Klicken oder ziehen zum Markieren</div>' : '';
+      showTip(`<div class="t-title">${esc(b.label)}</div><div class="t-total">${euro(b.total)}</div>${tipRows(b.parts, b.total)}${exRow}${b.exText ? `<div class="t-ex">${esc(b.exText)}</div>` : ''}${hint}`, e.clientX, e.clientY);
     });
-    hit.addEventListener('mouseleave', () => { bars.forEach(o => o && o.classList.remove('dim')); hideTip(); });
+    hit.addEventListener('mouseleave', () => { if (!drag) bars.forEach(o => o && o.classList.remove('dim')); hideTip(); });
     svg.append(hit);
   });
 
@@ -93,6 +104,49 @@ export function columnChart(container, { buckets, avg, avgLabel }) {
     svg.append(t);
   }
   container.append(svg);
+
+  // --- Markieren: klicken oder mit gedrückter Maustaste über mehrere Balken ziehen
+  let drag = null;
+  const idxAt = e => {
+    const r = svg.getBoundingClientRect();
+    const px = (e.clientX - r.left) * (W / r.width);
+    return Math.max(0, Math.min(buckets.length - 1, Math.floor((px - m.l) / band)));
+  };
+  const paint = (a, b) => {
+    const i0 = Math.min(a, b), i1 = Math.max(a, b);
+    sel.setAttribute('x', m.l + band * i0 + 1);
+    sel.setAttribute('width', Math.max(2, band * (i1 - i0 + 1) - 2));
+    sel.setAttribute('visibility', 'visible');
+    bars.forEach((o, j) => o && o.classList.toggle('dim', j < i0 || j > i1));
+  };
+  const clear = () => { sel.setAttribute('visibility', 'hidden'); bars.forEach(o => o && o.classList.remove('dim')); };
+  if (onSelect) {
+    svg.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      const r = svg.getBoundingClientRect();
+      const px = (e.clientX - r.left) * (W / r.width);
+      if (px < m.l) return;
+      e.preventDefault();
+      hideTip();
+      drag = { a: idxAt(e), b: idxAt(e) };
+      paint(drag.a, drag.b);
+      svg.setPointerCapture(e.pointerId);
+    });
+    svg.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const b = idxAt(e);
+      if (b !== drag.b) { drag.b = b; paint(drag.a, drag.b); }
+    });
+    const finish = e => {
+      if (!drag) return;
+      const { a, b } = drag;
+      drag = null;
+      onSelect(Math.min(a, b), Math.max(a, b), e.clientX, e.clientY);
+    };
+    svg.addEventListener('pointerup', finish);
+    svg.addEventListener('pointercancel', () => { drag = null; clear(); });
+  }
+  return { clearSelection: clear };
 }
 
 /**

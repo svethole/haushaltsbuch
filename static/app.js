@@ -161,7 +161,8 @@ function viewErfassen() {
 
   function entryRow(e) {
     const c = cat(e.category_id);
-    const row = h('div', { class: 'entry-row', 'data-id': e.id },
+    const exr = EX.reason(e.date);
+    const row = h('div', { class: 'entry-row' + (exr ? ' ex-row' : ''), 'data-id': e.id, title: exr ? `Zählt nicht in der Statistik: ${exr.label}` : null },
       catBadge(c),
       h('div', { class: 'what' },
         h('div', { class: 'shop' }, e.shop),
@@ -432,6 +433,7 @@ function viewAuswertung() {
   const inRange = S.data.expenses.filter(e => e.date >= P.from && e.date <= P.to && match(e));
   const items = inRange.filter(e => keep(e.date));
   const skipped = inRange.length - items.length;
+  const exItems = withEx ? [] : inRange.filter(e => EX.isExcluded(e.date)); // werden nur grau angezeigt
   const total = items.reduce((s, e) => s + e.amount, 0);
   const len = daysBetween(P.from, P.to);
   const elapsedTo = P.to > t ? t : P.to;
@@ -470,14 +472,25 @@ function viewAuswertung() {
 
   // --- Verlauf
   const gran = len <= 62 ? 'day' : len <= 400 ? 'week' : 'month';
-  const buckets = buildBuckets(P.from, P.to, gran, items, len, !withEx);
+  const buckets = buildBuckets(P.from, P.to, gran, items, len, !withEx, exItems);
   const chartBox = h('div', { class: 'chart' });
   const chartCard = h('div', { class: 'card' },
     h('h2', {}, 'Verlauf', h('span', { class: 'sub' }, { day: 'pro Tag', week: 'pro Woche', month: 'pro Monat' }[gran])),
     chartBox);
   main.append(chartCard);
   // Ø-Linie: Ø pro gezähltem Tag × Länge eines Balkens – unabhängig von Urlaub & Co.
-  const drawCols = () => columnChart(chartBox, { buckets, avg: Math.round(avgDay * { day: 1, week: 7, month: 30.44 }[gran]), avgLabel: 'Ø' });
+  let chart = null;
+  const drawCols = () => {
+    chart = columnChart(chartBox, {
+      buckets, avg: Math.round(avgDay * { day: 1, week: 7, month: 30.44 }[gran]), avgLabel: 'Ø',
+      onSelect: (i0, i1, x, y) => {
+        const b0 = buckets[i0], b1 = buckets[i1];
+        const label = i0 === i1 ? b0.label : `${b0.short} – ${b1.short}`;
+        rangeMenu(x, y, b0.from, b1.to, label, () => chart && chart.clearSelection());
+      },
+    });
+  };
+  chartCard.querySelector('h2').append(h('span', { class: 'sub chart-hint' }, '· Balken anklicken oder darüberziehen, um Zeiträume auszunehmen'));
 
   // --- Kategorien
   const donutBox = h('div');
@@ -527,7 +540,8 @@ function viewAuswertung() {
   main.append(h('div', { class: 'grid-2', style: { marginTop: '16px' } }, catCard, shopCard));
 
   // --- Einzelbuchungen
-  const sorted = items.slice().sort((x, y) => {
+  const shown = items.concat(exItems);
+  const sorted = shown.slice().sort((x, y) => {
     const k = a.sort === 'amount' ? x.amount - y.amount : x.date.localeCompare(y.date) || x.id - y.id;
     return k * a.sortDir;
   });
@@ -535,18 +549,20 @@ function viewAuswertung() {
     class: 'sortable ' + cls, onclick: () => { if (a.sort === key) a.sortDir *= -1; else { a.sort = key; a.sortDir = -1; } render(); },
   }, label, a.sort === key ? (a.sortDir < 0 ? ' ↓' : ' ↑') : '');
   const rowsCard = h('div', { class: 'card', style: { marginTop: '16px' } },
-    h('div', { class: 'card-head' }, h('h2', {}, 'Einzelbuchungen', h('span', { class: 'sub' }, `${items.length}`)),
-      items.length ? h('button', { class: 'btn small', onclick: () => downloadCsv(sorted, P) }, icon('download'), 'Als CSV') : null));
-  if (items.length) {
+    h('div', { class: 'card-head' }, h('h2', {}, 'Einzelbuchungen', h('span', { class: 'sub' }, `${items.length}` + (exItems.length ? ` · ${exItems.length} ausgegraut (zählen nicht)` : ''))),
+      items.length ? h('button', { class: 'btn small', onclick: () => downloadCsv(items.slice().sort((x, y) => x.date.localeCompare(y.date)), P) }, icon('download'), 'Als CSV') : null));
+  if (shown.length) {
     rowsCard.append(h('div', { class: 'table-scroll' }, h('table', { class: 'data' },
       h('thead', {}, h('tr', {}, sortTh('date', 'Datum'), h('th', {}, 'Geschäft'), h('th', {}, 'Kategorie'), h('th', {}, 'Notiz'), sortTh('amount', 'Betrag', 'num'))),
       h('tbody', {}, sorted.slice(0, a.showRows).map(e => {
         const c = cat(e.category_id);
-        return h('tr', {}, h('td', { class: 'tabular', style: { whiteSpace: 'nowrap' } }, fmtDate(e.date, { weekday: true })), h('td', {}, e.shop),
+        const r = !withEx && EX.reason(e.date);
+        return h('tr', { class: r ? 'ex-row' : '', title: r ? `Zählt nicht in der Statistik: ${r.label}` : null },
+          h('td', { class: 'tabular', style: { whiteSpace: 'nowrap' } }, fmtDate(e.date, { weekday: true })), h('td', {}, e.shop),
           h('td', {}, h('div', { class: 'cell-cat' }, h('span', { class: 'swatch', style: { background: c.color } }), c.name)),
-          h('td', { class: 'muted' }, e.note || ''), h('td', { class: 'num' }, euro(e.amount)));
+          h('td', { class: 'muted' }, r ? h('span', { class: 'badge' }, r.label) : null, e.note || ''), h('td', { class: 'num' }, euro(e.amount)));
       })))));
-    if (items.length > a.showRows) rowsCard.append(h('button', { class: 'btn small ghost', style: { marginTop: '8px' }, onclick: () => { a.showRows += 200; render(); } }, `Weitere anzeigen (${items.length - a.showRows} übrig)`));
+    if (shown.length > a.showRows) rowsCard.append(h('button', { class: 'btn small ghost', style: { marginTop: '8px' }, onclick: () => { a.showRows += 200; render(); } }, `Weitere anzeigen (${shown.length - a.showRows} übrig)`));
   } else rowsCard.append(h('div', { class: 'empty' }, 'Keine Buchungen für diese Auswahl.'));
   main.append(rowsCard);
 
@@ -567,11 +583,11 @@ function observeResize(el, fn) {
   resizeObs.observe(el);
 }
 
-function buildBuckets(from, to, gran, items, len, markExcluded) {
+function buildBuckets(from, to, gran, items, len, markExcluded, exItems = []) {
   const t = today();
   const buckets = [];
   const index = new Map();
-  const add = (key, label, short, future) => { const b = { key, label, short, total: 0, parts: new Map(), future }; buckets.push(b); index.set(key, b); };
+  const add = (key, label, short, future) => { const b = { key, label, short, total: 0, exTotal: 0, parts: new Map(), future }; buckets.push(b); index.set(key, b); };
   if (gran === 'day') {
     for (let d = from; d <= to; d = addDays(d, 1)) {
       const dd = parseISO(d);
@@ -594,16 +610,96 @@ function buildBuckets(from, to, gran, items, len, markExcluded) {
     b.total += e.amount;
     b.parts.set(e.category_id, (b.parts.get(e.category_id) || 0) + e.amount);
   }
-  return buckets.map((b, i) => {
+  for (const e of exItems) {
+    const b = index.get(keyOf(e.date));
+    if (b) b.exTotal += e.amount;
+  }
+  return buckets.map(b => {
     const out = { ...b, parts: [...b.parts].map(([id, amount]) => ({ cat: cat(id), amount })) };
+    const bFrom = gran === 'month' ? b.key + '-01' : b.key;
+    const bTo = gran === 'day' ? b.key : gran === 'week' ? addDays(b.key, 6) : monthEnd(bFrom);
+    out.from = bFrom < from ? from : bFrom; // Tage dieses Balkens innerhalb des gewählten Zeitraums
+    out.to = bTo > to ? to : bTo;
     if (markExcluded) {
-      const bFrom = gran === 'month' ? b.key + '-01' : b.key;
-      const bTo = gran === 'day' ? b.key : gran === 'week' ? addDays(b.key, 6) : monthEnd(bFrom);
-      const sc = EX.scan(bFrom < from ? from : bFrom, bTo > to ? to : bTo);
+      const sc = EX.scan(out.from, out.to);
       if (sc.ex) { out.ex = sc.ex / sc.all; out.exText = (sc.ex === sc.all ? 'Zählt nicht: ' : `${sc.ex} von ${sc.all} Tagen zählen nicht: `) + EX.describe(sc); }
     }
     return out;
   });
+}
+
+// ---------------------------------------------------------------- Kontextmenü für markierte Zeiträume
+let ctxMenu = null;
+function closeRangeMenu() {
+  if (!ctxMenu) return;
+  const { el, onClose, off } = ctxMenu;
+  ctxMenu = null;
+  el.remove(); off(); onClose && onClose();
+}
+
+/** Menü am Mauszeiger: markierten Zeitraum ausnehmen, wieder mitzählen oder genauer ansehen */
+function rangeMenu(x, y, from, to, title, onClose) {
+  closeRangeMenu();
+  const sc = EX.scan(from, to);
+  const el = h('div', { class: 'ctx-menu', role: 'menu', 'aria-label': 'Markierter Zeitraum' });
+  el.append(h('div', { class: 'ctx-title' }, title),
+    h('div', { class: 'ctx-sub' }, `${fmtRange(from, to)} · ${sc.all} ${sc.all === 1 ? 'Tag' : 'Tage'}` + (sc.ex ? ` · ${sc.ex === sc.all ? 'alle' : sc.ex} ausgenommen` : '')));
+  const done = msg => { closeRangeMenu(); indexData(); render(); if (msg) toast(msg); };
+  const fail = e => toast(e.message, { error: true });
+  if (sc.included) {
+    const label = h('input', { type: 'text', value: 'Urlaub', maxlength: 60, list: 'ctx-labels', 'aria-label': 'Bezeichnung', placeholder: 'Bezeichnung' });
+    const labels = [...new Set(['Urlaub', 'Nicht erfasst', 'Krank', ...S.data.excluded.map(p => p.label).filter(Boolean)])];
+    const go = async () => {
+      try {
+        const p = await api('POST', 'excluded', { day_from: from, day_to: to, label: label.value.trim() });
+        S.data.excluded.push(p);
+        done(`${fmtRange(from, to)} zählt nicht mehr mit`);
+      } catch (e) { fail(e); }
+    };
+    label.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+    el.append(h('div', { class: 'ctx-form' }, label, h('datalist', { id: 'ctx-labels' }, labels.map(l => h('option', { value: l })))),
+      h('button', { type: 'button', class: 'ctx-item', role: 'menuitem', onclick: go }, icon('bell-off'), 'Markierten Zeitraum ausschließen'));
+    setTimeout(() => { label.focus(); label.select(); }, 0);
+  }
+  if (sc.ex) {
+    el.append(h('button', { type: 'button', class: 'ctx-item', role: 'menuitem', onclick: async () => {
+      try { await includeRange(from, to, sc); done(`${fmtRange(from, to)} zählt wieder mit`); } catch (e) { fail(e); }
+    } }, icon('circle-check'), sc.ex === sc.all ? 'Zeitraum wieder aktivieren' : 'Ausgenommene Tage wieder aktivieren',
+      sc.beforeStart ? h('span', { class: 'ctx-note' }, `Erfassungsbeginn wird auf ${fmtDate(from)} vorverlegt`) : null));
+  }
+  el.append(h('button', { type: 'button', class: 'ctx-item', role: 'menuitem', onclick: () => {
+    S.ana.preset = 'custom'; S.ana.from = from; S.ana.to = to; S.ana.offset = 0; saveAnaPrefs(); closeRangeMenu(); render();
+  } }, icon('search'), 'Nur diesen Zeitraum anzeigen'),
+  h('button', { type: 'button', class: 'ctx-item muted', role: 'menuitem', onclick: closeRangeMenu }, icon('x'), 'Abbrechen'));
+  document.body.append(el);
+  const r = el.getBoundingClientRect();
+  el.style.left = Math.max(8, Math.min(x + 6, window.innerWidth - r.width - 8)) + 'px';
+  el.style.top = Math.max(8, Math.min(y + 6, window.innerHeight - r.height - 8)) + 'px';
+  const outside = e => { if (!el.contains(e.target)) closeRangeMenu(); };
+  const key = e => { if (e.key === 'Escape') closeRangeMenu(); };
+  setTimeout(() => document.addEventListener('pointerdown', outside), 0);
+  document.addEventListener('keydown', key);
+  window.addEventListener('hashchange', closeRangeMenu, { once: true });
+  ctxMenu = { el, onClose, off: () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', key); } };
+}
+
+/** Nimmt from..to wieder in die Statistik auf: Zeiträume löschen, kürzen oder teilen */
+async function includeRange(from, to, sc) {
+  for (const p of S.data.excluded.filter(q => q.day_from <= to && q.day_to >= from)) {
+    const left = p.day_from < from, right = p.day_to > to, origTo = p.day_to;
+    if (!left && !right) {
+      await api('DELETE', `excluded/${p.id}`);
+      S.data.excluded = S.data.excluded.filter(q => q.id !== p.id);
+    } else {
+      if (left) Object.assign(p, await api('PUT', `excluded/${p.id}`, { day_from: p.day_from, day_to: addDays(from, -1), label: p.label }));
+      else Object.assign(p, await api('PUT', `excluded/${p.id}`, { day_from: addDays(to, 1), day_to: p.day_to, label: p.label }));
+      if (left && right) S.data.excluded.push(await api('POST', 'excluded', { day_from: addDays(to, 1), day_to: origTo, label: p.label }));
+    }
+  }
+  if (sc.beforeStart) { // Tage vor Beginn der Erfassung: Beginn vorverlegen
+    const r = await api('PUT', 'settings', { tracking_start: from });
+    S.data.settings.tracking_start = r.tracking_start;
+  }
 }
 
 function kpi(label, value, sub) {

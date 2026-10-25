@@ -601,3 +601,35 @@ body.has-alertbar .alertpanel { bottom: 70px; }
 .ex-note svg { width: 15px; height: 15px; flex: none; }
 .ex-box { align-items: center; }
 .ex-box .btn { flex: none; }
+
+/* ---------------------------------------------------------------- Markieren im Diagramm */
+.chart svg.selectable { cursor: crosshair; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.chart .col { transition: opacity .12s; }
+.chart .col.dim { opacity: .35; }
+.chart .bar-ex { fill: var(--axis); }
+.chart .sel-band { fill: var(--accent); fill-opacity: .12; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 4 3; pointer-events: none; }
+.tooltip .t-hint { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+.chart-hint { font-size: 12px; }
+@media (hover: none) { .chart-hint { display: none; } }
+.ctx-menu {
+  position: fixed; z-index: 170; min-width: 260px; max-width: calc(100vw - 16px);
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px;
+  box-shadow: var(--shadow-pop); padding: 6px; animation: toast-in .12s ease-out;
+}
+.ctx-menu .ctx-title { font-weight: 650; padding: 6px 10px 0; }
+.ctx-menu .ctx-sub { font-size: 12.5px; color: var(--muted); padding: 0 10px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.ctx-menu .ctx-form { padding: 4px 6px 2px; }
+.ctx-menu .ctx-form input { min-height: 34px; font-size: 14px; padding: 5px 9px; }
+.ctx-menu .ctx-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  background: none; border: 0; border-radius: 8px; padding: 8px 10px; cursor: pointer; font-size: 14px; color: var(--ink);
+}
+.ctx-menu .ctx-item svg { width: 16px; height: 16px; color: var(--ink-2); }
+.ctx-menu .ctx-item:hover, .ctx-menu .ctx-item:focus-visible { background: var(--accent-soft); outline: none; }
+.ctx-menu .ctx-item.muted { color: var(--muted); }
+table.data tr.ex-row td { color: var(--muted); }
+table.data tr.ex-row td .swatch { opacity: .45; }
+table.data tr.ex-row .badge { margin: 0 6px 0 0; }
+.entry-row.ex-row { opacity: .55; }
+.ctx-menu .ctx-item { flex-wrap: wrap; }
+.ctx-menu .ctx-note { flex-basis: 100%; padding-left: 26px; font-size: 12px; color: var(--muted); }
