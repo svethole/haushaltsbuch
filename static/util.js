@@ -139,6 +139,8 @@ export function norm(s) {
 
 // ---------------------------------------------------------------- Schnittstelle
 export async function api(method, path, body) {
+  // Schreibende Anfragen immer als JSON schicken (der Server lehnt alles andere ab)
+  if (method !== 'GET' && body === undefined) body = {};
   const res = await fetch('api/' + path, {
     method,
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},

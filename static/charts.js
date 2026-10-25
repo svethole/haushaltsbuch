@@ -43,6 +43,16 @@ export function columnChart(container, { buckets, avg, avgLabel }) {
   const bw = Math.max(2, Math.min(34, band * 0.68));
 
   const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': 'Ausgaben im Zeitverlauf' });
+  // Schraffur für Tage, die nicht in die Statistik eingehen
+  const pid = 'hatch' + Math.random().toString(36).slice(2, 8);
+  const defs = s('defs');
+  const pat = s('pattern', { id: pid, width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
+  pat.append(s('rect', { width: 6, height: 6, class: 'hatch-bg' }), s('line', { x1: 0, y1: 0, x2: 0, y2: 6, class: 'hatch-line' }));
+  defs.append(pat);
+  svg.append(defs);
+  buckets.forEach((b, i) => {
+    if (b.ex) svg.append(s('rect', { x: m.l + band * i + 1, y: m.t, width: Math.max(1, band - 2), height: ih, fill: `url(#${pid})`, class: 'ex-band', opacity: 0.45 + 0.55 * b.ex }));
+  });
   for (let v = 0; v <= top + 1e-6; v += step) {
     if (v > 0) svg.append(s('line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), class: 'gridline' }));
     const t = s('text', { x: m.l - 8, y: y(v) + 4, 'text-anchor': 'end', class: 'axis-label' });
@@ -70,7 +80,7 @@ export function columnChart(container, { buckets, avg, avgLabel }) {
     const hit = s('rect', { x: m.l + band * i, y: m.t, width: band, height: ih, class: 'hit' });
     hit.addEventListener('mousemove', e => {
       bars.forEach((o, j) => o && o.classList.toggle('dim', j !== i));
-      showTip(`<div class="t-title">${esc(b.label)}</div><div class="t-total">${euro(b.total)}</div>${tipRows(b.parts, b.total)}`, e.clientX, e.clientY);
+      showTip(`<div class="t-title">${esc(b.label)}</div><div class="t-total">${euro(b.total)}</div>${tipRows(b.parts, b.total)}${b.exText ? `<div class="t-ex">${esc(b.exText)}</div>` : ''}`, e.clientX, e.clientY);
     });
     hit.addEventListener('mouseleave', () => { bars.forEach(o => o && o.classList.remove('dim')); hideTip(); });
     svg.append(hit);

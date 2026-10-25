@@ -4,6 +4,7 @@ Eine kleine, selbst gehostete Web-App für das tägliche Haushaltsbuch: Ausgaben
 
 - **Erfassen** mit Tastatur: Datum → Geschäft → Betrag → Kategorie → Enter. Vorschläge aus früheren Einträgen erscheinen grau im Feld und werden mit <kbd>Tab</kbd> übernommen. Nach der Wahl des Geschäfts wird die dort übliche Kategorie vorgeschlagen. Beträge wie `3,30+2,10` werden zusammengerechnet.
 - **Auswertung** für aktuelle KW, letzte 7 Tage, aktuellen Monat, letzte 30 Tage, aktuelles Jahr, letzte 365 Tage oder einen freien Zeitraum (mit Blättern nach vorne und zurück), filterbar nach Kategorien und Geschäften (auch kombiniert). Verlauf, Anteile je Kategorie, Geschäfte, Einzelbuchungen und CSV-Export.
+- **Tage ohne Statistik:** Urlaub, Krankheit oder Wochen ohne Aufzeichnung lassen sich tage- oder wochenweise ausnehmen (Wochenleiste unter „Erfassen“ oder unter Einstellungen). Tage vor Beginn der Erfassung zählen automatisch nicht mit. Durchschnitte, Vergleiche und Diagramme rechnen nur mit den gezählten Tagen.
 - **Feste Kategorien** mit eigener Farbe und eigenem Symbol, die überall gleich aussehen. Kategorien und Geschäfte lassen sich umbenennen und zusammenlegen.
 - **Spartöpfe** mit Ein- und Auszahlungen und optionalem Sparziel.
 - **Monatsüberblick** über regelmäßige Einnahmen und Fixkosten (monatlich, vierteljährlich, jährlich …).
@@ -149,5 +150,6 @@ Alle Antworten sind JSON, Beträge immer in Cent.
 | POST/PUT/DELETE | `/api/pots[/id]`, `/api/pot_tx[/id]` | Spartöpfe und deren Buchungen |
 | POST/PUT/DELETE | `/api/recurring[/id]` | regelmäßige Einnahmen und Fixkosten |
 | POST/PUT/DELETE | `/api/subs[/id]` | Abos samt Erinnerungseinstellungen |
-| PUT | `/api/settings` | Einstellungen (E-Mail-Adresse für Erinnerungen) |
+| PUT | `/api/settings` | Einstellungen (E-Mail-Adresse, Beginn der Erfassung) |
+| POST/PUT/DELETE | `/api/excluded[/id]` | Zeiträume ohne Statistik (`day_from`, `day_to`, `label`) |
 | POST | `/api/test-email` | Test-E-Mail verschicken |

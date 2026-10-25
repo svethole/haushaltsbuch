@@ -578,3 +578,26 @@ body.has-alertbar .alertpanel { bottom: 70px; }
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .alertbar, :root:not([data-theme="light"]) .alertfab { background: #b42a2a; } }
 :root[data-theme="dark"] .alertbar, :root[data-theme="dark"] .alertfab { background: #b42a2a; }
+
+/* ---------------------------------------------------------------- Tage ohne Statistik */
+.chart .hatch-bg { fill: var(--surface-2); }
+.chart .hatch-line { stroke: var(--axis); stroke-width: 2; }
+.tooltip .t-ex { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12.5px; }
+.day-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin: 0 0 12px; }
+.day-chip {
+  display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 6px 2px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--ink-2); font-size: 12px;
+}
+.day-chip:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.day-chip .dc-wd { font-weight: 650; }
+.day-chip .dc-d { color: var(--muted); font-variant-numeric: tabular-nums; }
+.day-chip.today { border-color: var(--accent); }
+.day-chip.ex {
+  background: repeating-linear-gradient(45deg, var(--surface-2) 0 4px, var(--surface-3) 4px 8px);
+  color: var(--muted); border-style: dashed;
+}
+.day-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ex-note { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin: -4px 0 10px; }
+.ex-note svg { width: 15px; height: 15px; flex: none; }
+.ex-box { align-items: center; }
+.ex-box .btn { flex: none; }

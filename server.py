@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS subs (
     snooze_until TEXT,                           -- später erinnern
     email_key    TEXT NOT NULL DEFAULT ''        -- welche Erinnerung schon gemailt wurde
 );
+CREATE TABLE IF NOT EXISTS pauses (               -- Zeiträume ohne Statistik (Urlaub …)
+    id    INTEGER PRIMARY KEY,
+    day_from TEXT NOT NULL,              -- erster Tag (JJJJ-MM-TT)
+    day_to   TEXT NOT NULL,              -- letzter Tag, inklusive
+    label TEXT NOT NULL DEFAULT ''       -- z. B. Urlaub
+);
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -157,8 +163,10 @@ def all_data(con):
         "pot_tx": rows(con, "SELECT * FROM pot_tx ORDER BY date, id"),
         "recurring": rows(con, "SELECT * FROM recurring ORDER BY kind DESC, grp, name"),
         "subs": rows(con, "SELECT * FROM subs ORDER BY name"),
+        "excluded": rows(con, "SELECT * FROM pauses ORDER BY day_from"),
         "settings": {
             "notify_email": get_setting(con, "notify_email", ""),
+            "tracking_start": get_setting(con, "tracking_start", ""),
             "smtp_configured": smtp_config() is not None,
             "today": date.today().isoformat(),
         },
@@ -490,13 +498,44 @@ def h_sub_delete(con, b, id_):
     return {"ok": True}
 
 
+def excluded_fields(b, c=None):
+    c = c or {}
+    start = v_date(b.get("day_from", c.get("day_from")), "Von")
+    end = v_date(b.get("day_to", c.get("day_to")), "Bis")
+    if end < start:
+        start, end = end, start
+    if (date.fromisoformat(end) - date.fromisoformat(start)).days > 3660:
+        raise ApiError(400, "Der Zeitraum ist zu lang (höchstens 10 Jahre)")
+    return start, end, v_text(b.get("label", c.get("label", "")), "Bezeichnung", required=False, max_len=60)
+
+
+def h_excluded_create(con, b):
+    cur = con.execute("INSERT INTO pauses (day_from, day_to, label) VALUES (?,?,?)", excluded_fields(b))
+    return need(con, "pauses", cur.lastrowid)
+
+
+def h_excluded_update(con, b, id_):
+    c = need(con, "pauses", id_)
+    con.execute("UPDATE pauses SET day_from=?, day_to=?, label=? WHERE id=?", (*excluded_fields(b, c), id_))
+    return need(con, "pauses", id_)
+
+
+def h_excluded_delete(con, b, id_):
+    need(con, "pauses", id_)
+    con.execute("DELETE FROM pauses WHERE id=?", (id_,))
+    return {"ok": True}
+
+
 def h_settings(con, b):
+    if "tracking_start" in b:
+        ts = b.get("tracking_start") or ""
+        set_setting(con, "tracking_start", v_date(ts, "Erfassung seit") if ts else "")
     if "notify_email" in b:
         mail = v_text(b.get("notify_email"), "E-Mail", required=False, max_len=200)
         if mail and not EMAIL_RE.match(mail):
             raise ApiError(400, "Das sieht nicht wie eine E-Mail-Adresse aus")
         set_setting(con, "notify_email", mail)
-    return {"ok": True, "notify_email": get_setting(con, "notify_email", "")}
+    return {"ok": True, "notify_email": get_setting(con, "notify_email", ""), "tracking_start": get_setting(con, "tracking_start", "")}
 
 
 # --- Erinnerungen (gleiche Regeln wie in der Oberfläche, static/subs.js)
@@ -658,7 +697,8 @@ def export_data(con):
         ],
         "recurring": rows(con, "SELECT kind, name, amount, interval, grp, variable, note, active FROM recurring"),
         "subs": rows(con, f"SELECT {SUB_COLS} FROM subs ORDER BY name"),
-        "settings": {"notify_email": get_setting(con, "notify_email", "")},
+        "excluded": rows(con, "SELECT day_from, day_to, label FROM pauses ORDER BY day_from"),
+        "settings": {"notify_email": get_setting(con, "notify_email", ""), "tracking_start": get_setting(con, "tracking_start", "")},
     }
 
 
@@ -708,8 +748,12 @@ def import_data(con, data):
         con.execute("DELETE FROM subs")
         for sb in data.get("subs", []):
             con.execute(f"INSERT INTO subs ({SUB_COLS}) VALUES ({','.join('?' * 16)})", sub_fields(sb))
-    if isinstance(data.get("settings"), dict) and "notify_email" in data["settings"]:
-        h_settings(con, {"notify_email": data["settings"]["notify_email"]})
+    if "excluded" in data:
+        con.execute("DELETE FROM pauses")
+        for ex in data.get("excluded", []):
+            con.execute("INSERT INTO pauses (day_from, day_to, label) VALUES (?,?,?)", excluded_fields(ex))
+    if isinstance(data.get("settings"), dict):
+        h_settings(con, {k: v for k, v in data["settings"].items() if k in ("notify_email", "tracking_start")})
     return {"ok": True, "expenses": len(data.get("expenses", [])), "categories": len(cat_ids)}
 
 
@@ -736,6 +780,9 @@ ROUTES = [
     ("PUT", r"/api/subs/(\d+)", h_sub_update),
     ("DELETE", r"/api/subs/(\d+)", h_sub_delete),
     ("PUT", r"/api/settings", h_settings),
+    ("POST", r"/api/excluded", h_excluded_create),
+    ("PUT", r"/api/excluded/(\d+)", h_excluded_update),
+    ("DELETE", r"/api/excluded/(\d+)", h_excluded_delete),
     ("POST", r"/api/import", import_data),
 ]
 ROUTES = [(m, re.compile("^" + p + "$"), f) for m, p, f in ROUTES]

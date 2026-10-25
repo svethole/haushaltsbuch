@@ -9,6 +9,7 @@ import {
   PROVIDERS, providerOf, shortLabel, CANCEL_TIP, SUB_INTERVALS, effectiveDue, activeReminder, monthlyOf, dueText, reminderLabel,
   initAlerts, refreshAlerts, browserSupport, askBrowserPermission,
 } from './subs.js';
+import { makeExcluder, START_LABEL } from './excluded.js';
 import { columnChart, donutChart } from './charts.js';
 
 // ---------------------------------------------------------------- Konstanten
@@ -44,9 +45,12 @@ function saveAnaPrefs() {
 
 const main = document.getElementById('main');
 let catMap = new Map();
+let EX = null; // ausgeschlossene Tage (siehe excluded.js)
 
 function indexData() {
   catMap = new Map(S.data.categories.map(c => [c.id, c]));
+  S.data.excluded = S.data.excluded || [];
+  EX = makeExcluder(S.data);
 }
 const cat = id => catMap.get(id);
 const activeCats = () => S.data.categories.filter(c => !c.archived);
@@ -122,6 +126,19 @@ function viewErfassen() {
       S.erf.week !== mondayOf(t) ? h('button', { class: 'btn small ghost', onclick: () => { S.erf.week = mondayOf(t); renderList(); renderSummary(); } }, 'Heute') : null,
     );
     listCard.append(h('div', { class: 'card-head' }, h('h2', {}, 'Buchungen'), nav));
+    const strip = h('div', { class: 'day-strip', role: 'group', 'aria-label': 'Tage dieser Woche' });
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      const r = EX.reason(d);
+      const day = d;
+      strip.append(h('button', {
+        type: 'button', class: 'day-chip' + (r ? ' ex' : '') + (d === t ? ' today' : ''),
+        title: r ? `Zählt nicht in der Statistik: ${r.label} – klicken zum Ändern` : 'Klicken, um diesen Tag (oder die Woche) aus der Statistik zu nehmen',
+        onclick: () => excludeDialog(day, from, () => { renderList(); renderSummary(); }),
+      }, h('span', { class: 'dc-wd' }, weekdayShort(d)), h('span', { class: 'dc-d' }, parseISO(d).getDate() + '.')));
+    }
+    listCard.append(strip);
+    const wk = EX.scan(from, to);
+    if (wk.ex) listCard.append(h('div', { class: 'ex-note' }, icon('info'), wk.ex === 7 ? `Diese Woche zählt nicht in der Statistik: ${EX.describe(wk)}.` : `Nicht in der Statistik: ${EX.describe(wk)}.`));
 
     const items = S.data.expenses.filter(e => e.date >= from && e.date <= to);
     if (!items.length) {
@@ -135,7 +152,7 @@ function viewErfassen() {
       const sum = list.reduce((a, e) => a + e.amount, 0);
       const g = h('div', { class: 'day-group' },
         h('div', { class: 'day-head' },
-          h('span', {}, fmtDateLong(d), d === t ? h('span', { class: 'today-tag' }, 'heute') : null),
+          h('span', {}, fmtDateLong(d), d === t ? h('span', { class: 'today-tag' }, 'heute') : null, EX.isExcluded(d) ? h('span', { class: 'badge' }, 'nicht in der Statistik') : null),
           h('span', { class: 'num' }, euro(sum))));
       for (const e of list) g.append(entryRow(e));
       listCard.append(g);
@@ -179,14 +196,20 @@ function viewErfassen() {
     const items = S.data.expenses.filter(e => e.date >= from && e.date <= to);
     const total = items.reduce((a, e) => a + e.amount, 0);
     const days = Math.max(1, Math.min(7, daysBetween(from, t > to ? to : t)));
-    // laufende Woche fair vergleichen: nur die gleichen Wochentage der Vorwoche
-    const prev = S.data.expenses.filter(e => e.date >= addDays(from, -7) && e.date <= addDays(from, days - 8)).reduce((a, e) => a + e.amount, 0);
+    // Ø pro Tag ohne ausgeschlossene Tage; Vorwoche über die gleichen Wochentage
+    const counted = items.filter(e => !EX.isExcluded(e.date)).reduce((a, e) => a + e.amount, 0);
+    const cDays = EX.scan(from, addDays(from, days - 1)).included;
+    const pFrom = addDays(from, -7), pTo = addDays(from, days - 8);
+    const pDays = EX.scan(pFrom, pTo).included;
+    const pSum = S.data.expenses.filter(e => e.date >= pFrom && e.date <= pTo && !EX.isExcluded(e.date)).reduce((a, e) => a + e.amount, 0);
+    const avg = cDays ? Math.round(counted / cDays) : null;
+    const prev = pDays && pSum ? Math.round(pSum / pDays) : 0;
     const prevLabel = days < 7 ? `Vorwoche bis ${weekday(addDays(from, days - 1))}` : 'Vorwoche';
     sumCard.append(h('h2', {}, 'Woche im Überblick'));
     sumCard.append(h('div', { class: 'week-summary' },
       h('div', { class: 'week-total' }, euro(total)),
-      h('div', { class: 'muted' }, `${items.length} ${items.length === 1 ? 'Buchung' : 'Buchungen'} · Ø ${euro(Math.round(total / days))} pro Tag`),
-      prev ? h('div', { class: 'muted' }, `${prevLabel}: ${euro(prev)} (${total >= prev ? '+' : '−'}${pct(Math.abs(total - prev), prev)})`) : null));
+      h('div', { class: 'muted' }, `${items.length} ${items.length === 1 ? 'Buchung' : 'Buchungen'}` + (avg != null ? ` · Ø ${euro(avg)} pro Tag` : ' · zählt nicht in der Statistik')),
+      prev && avg != null ? h('div', { class: 'muted' }, `${prevLabel}: Ø ${euro(prev)} pro Tag (${avg >= prev ? '+' : '−'}${pct(Math.abs(avg - prev), prev)})`) : null));
     const byCat = groupByCat(items);
     if (byCat.length) {
       sumCard.append(h('div', { class: 'stackbar' }, byCat.map(x => h('span', { title: `${x.cat.name}: ${euro(x.amount)}`, style: { width: (x.amount / total * 100) + '%', background: x.cat.color } }))));
@@ -404,38 +427,57 @@ function viewAuswertung() {
   // --- Daten
   const catSet = new Set(a.cats), shopSet = new Set(a.shops);
   const match = e => (!catSet.size || catSet.has(e.category_id)) && (!shopSet.size || shopSet.has(e.shop));
-  const items = S.data.expenses.filter(e => e.date >= P.from && e.date <= P.to && match(e));
+  const withEx = !!a.withExcluded;
+  const keep = d => withEx || !EX.isExcluded(d);
+  const inRange = S.data.expenses.filter(e => e.date >= P.from && e.date <= P.to && match(e));
+  const items = inRange.filter(e => keep(e.date));
+  const skipped = inRange.length - items.length;
   const total = items.reduce((s, e) => s + e.amount, 0);
   const len = daysBetween(P.from, P.to);
   const elapsedTo = P.to > t ? t : P.to;
   const elapsed = elapsedTo < P.from ? 0 : daysBetween(P.from, elapsedTo);
-  const prevFrom = addDays(P.from, -len), prevTo = addDays(P.from, -1);
-  const prevTotal = S.data.expenses.filter(e => e.date >= prevFrom && e.date <= prevTo && match(e)).reduce((s, e) => s + e.amount, 0);
-  // Vergleich fair halten: bei laufendem Zeitraum nur die bereits vergangenen Tage des Vorzeitraums
-  const prevCmpTotal = elapsed < len
-    ? S.data.expenses.filter(e => e.date >= prevFrom && e.date <= addDays(prevFrom, Math.max(0, elapsed - 1)) && match(e)).reduce((s, e) => s + e.amount, 0)
-    : prevTotal;
+  const sc = elapsed ? EX.scan(P.from, elapsedTo) : { all: 0, ex: 0, included: 0, beforeStart: 0, periods: [] };
+  const counted = withEx ? sc.all : sc.included;
+  const avgDay = counted ? total / counted : 0;
+  // Vergleich über den Ø pro Tag – so stören Urlaub & Co. auch im Vorzeitraum nicht.
+  // Bei laufendem Zeitraum nur der gleich lange Abschnitt davor.
+  const prevFrom = addDays(P.from, -len);
+  const prevEnd = elapsed < len ? addDays(prevFrom, Math.max(0, elapsed - 1)) : addDays(P.from, -1);
+  const prevItems = S.data.expenses.filter(e => e.date >= prevFrom && e.date <= prevEnd && match(e) && keep(e.date));
+  const psc = EX.scan(prevFrom, prevEnd);
+  const prevCounted = withEx ? psc.all : psc.included;
+  const prevAvg = prevCounted && prevItems.length ? prevItems.reduce((s, e) => s + e.amount, 0) / prevCounted : 0;
   const byCat = groupByCat(items);
 
   // --- Kennzahlen
-  const diff = total - prevCmpTotal;
+  const diff = avgDay - prevAvg;
+  const exSub = !withEx && sc.ex ? `über ${counted} Tage (${sc.ex} ausgeschlossen)` : elapsed < len ? `über ${elapsed} von ${len} Tagen` : `über ${len} Tage`;
   main.append(h('div', { class: 'kpis' },
     kpi('Summe', euro(total), `${items.length} ${items.length === 1 ? 'Buchung' : 'Buchungen'}`),
-    kpi('Ø pro Tag', elapsed ? euro(Math.round(total / elapsed)) : '–', elapsed < len ? `über ${elapsed} von ${len} Tagen` : `über ${len} Tage`),
-    kpi('Vergleich Vorzeitraum', prevCmpTotal ? `${diff >= 0 ? '+' : '−'}${pct(Math.abs(diff), prevCmpTotal)}` : '–',
-      prevCmpTotal ? h('span', {}, icon(diff >= 0 ? 'trending-up' : 'trending-down'), `${euro(prevCmpTotal)} ${elapsed < len ? 'im gleichen Abschnitt davor' : 'im Zeitraum davor'}`) : 'keine Daten davor'),
+    kpi('Ø pro Tag', counted ? euro(Math.round(avgDay)) : '–', counted ? exSub : 'alle Tage ausgeschlossen'),
+    kpi('Ø pro Tag ggü. davor', prevAvg && counted ? `${diff >= 0 ? '+' : '−'}${pct(Math.abs(diff), prevAvg)}` : '–',
+      prevAvg ? h('span', {}, icon(diff >= 0 ? 'trending-up' : 'trending-down'), `Ø ${euro(Math.round(prevAvg))} ${elapsed < len ? 'im gleichen Abschnitt davor' : 'im Zeitraum davor'}`) : 'keine Daten davor'),
     byCat[0] ? kpi('Größte Kategorie', byCat[0].cat.name, `${euro(byCat[0].amount)} · ${pct(byCat[0].amount, total)}`) : kpi('Größte Kategorie', '–', '')));
+  const fullScan = EX.scan(P.from, P.to);
+  if (fullScan.ex) {
+    const toggle = h('button', { class: 'btn small', onclick: () => { a.withExcluded = !withEx; render(); } }, withEx ? 'Wieder ausblenden' : 'Trotzdem mitzählen');
+    main.append(h('div', { class: 'note-box ex-box', style: { marginBottom: '16px' } }, icon('info'),
+      h('span', { style: { flex: 1 } }, withEx
+        ? `Ausgeschlossene Tage werden gerade mitgezählt: ${EX.describe(fullScan)}.`
+        : `Nicht mitgezählt: ${EX.describe(fullScan)}` + (skipped ? ` – dabei ${skipped} ${skipped === 1 ? 'Buchung' : 'Buchungen'}.` : '.')),
+      toggle));
+  }
 
   // --- Verlauf
   const gran = len <= 62 ? 'day' : len <= 400 ? 'week' : 'month';
-  const buckets = buildBuckets(P.from, P.to, gran, items, len);
-  const elapsedBuckets = buckets.filter(b => !b.future).length || 1;
+  const buckets = buildBuckets(P.from, P.to, gran, items, len, !withEx);
   const chartBox = h('div', { class: 'chart' });
   const chartCard = h('div', { class: 'card' },
     h('h2', {}, 'Verlauf', h('span', { class: 'sub' }, { day: 'pro Tag', week: 'pro Woche', month: 'pro Monat' }[gran])),
     chartBox);
   main.append(chartCard);
-  const drawCols = () => columnChart(chartBox, { buckets, avg: Math.round(total / elapsedBuckets), avgLabel: 'Ø' });
+  // Ø-Linie: Ø pro gezähltem Tag × Länge eines Balkens – unabhängig von Urlaub & Co.
+  const drawCols = () => columnChart(chartBox, { buckets, avg: Math.round(avgDay * { day: 1, week: 7, month: 30.44 }[gran]), avgLabel: 'Ø' });
 
   // --- Kategorien
   const donutBox = h('div');
@@ -525,7 +567,7 @@ function observeResize(el, fn) {
   resizeObs.observe(el);
 }
 
-function buildBuckets(from, to, gran, items, len) {
+function buildBuckets(from, to, gran, items, len, markExcluded) {
   const t = today();
   const buckets = [];
   const index = new Map();
@@ -552,7 +594,16 @@ function buildBuckets(from, to, gran, items, len) {
     b.total += e.amount;
     b.parts.set(e.category_id, (b.parts.get(e.category_id) || 0) + e.amount);
   }
-  return buckets.map(b => ({ ...b, parts: [...b.parts].map(([id, amount]) => ({ cat: cat(id), amount })) }));
+  return buckets.map((b, i) => {
+    const out = { ...b, parts: [...b.parts].map(([id, amount]) => ({ cat: cat(id), amount })) };
+    if (markExcluded) {
+      const bFrom = gran === 'month' ? b.key + '-01' : b.key;
+      const bTo = gran === 'day' ? b.key : gran === 'week' ? addDays(b.key, 6) : monthEnd(bFrom);
+      const sc = EX.scan(bFrom < from ? from : bFrom, bTo > to ? to : bTo);
+      if (sc.ex) { out.ex = sc.ex / sc.all; out.exText = (sc.ex === sc.all ? 'Zählt nicht: ' : `${sc.ex} von ${sc.all} Tagen zählen nicht: `) + EX.describe(sc); }
+    }
+    return out;
+  });
 }
 
 function kpi(label, value, sub) {
@@ -763,7 +814,8 @@ function viewMonat() {
   const inc = act.filter(r => r.kind === 'income').reduce((a, r) => a + monthly(r), 0);
   const fix = act.filter(r => r.kind === 'expense').reduce((a, r) => a + monthly(r), 0);
   const from = addDays(today(), -90);
-  const daily = Math.round(S.data.expenses.filter(e => e.date > from && e.date <= today()).reduce((a, e) => a + e.amount, 0) / 90 * 30.44);
+  const d90 = EX.scan(addDays(from, 1), today()).included;
+  const daily = d90 ? Math.round(S.data.expenses.filter(e => e.date > from && e.date <= today() && !EX.isExcluded(e.date)).reduce((a, e) => a + e.amount, 0) / d90 * 30.44) : 0;
   const subs = S.data.subs || [];
   const activeSubs = subs.filter(x => x.status === 'active');
   const subMonthly = activeSubs.reduce((a, x) => a + monthlyOf(x), 0);
@@ -776,7 +828,7 @@ function viewMonat() {
   main.append(h('div', { class: 'balance-row' },
     kpi('Einnahmen pro Monat', euro(inc), `${act.filter(r => r.kind === 'income').length} Posten`),
     kpi('Fixkosten & Abos pro Monat', euro(fix + subMonthly), `${act.filter(r => r.kind === 'expense').length} Posten · davon Abos ${euro(subMonthly)}`),
-    kpi('Tagesausgaben pro Monat', euro(daily), 'Ø der letzten 90 Tage'),
+    kpi('Tagesausgaben pro Monat', euro(daily), d90 < 90 ? `Ø der letzten 90 Tage (${90 - d90} ausgeschlossen)` : 'Ø der letzten 90 Tage'),
     inc ? kpi('Bleibt rechnerisch übrig', euro(rest), rest >= 0 ? h('span', { style: { color: 'var(--good)' } }, icon('check'), 'im Plus') : h('span', { style: { color: 'var(--danger)' } }, icon('info'), 'im Minus'))
       : kpi('Bleibt rechnerisch übrig', '–', 'erst Einnahmen eintragen')));
   if (!rec.length) {
@@ -1138,7 +1190,103 @@ function viewEinstellungen() {
       h('a', { class: 'btn', href: 'api/export', download: '' }, icon('download'), 'Sicherung herunterladen'),
       h('button', { class: 'btn', onclick: () => fileIn.click() }, icon('upload'), 'Sicherung einspielen'), fileIn));
 
-  main.append(h('div', { class: 'grid-2' }, h('div', { class: 'stack' }, catCard), h('div', { class: 'stack' }, notifyCard(), shopCard, dataCard)));
+  main.append(h('div', { class: 'grid-2' }, h('div', { class: 'stack' }, catCard), h('div', { class: 'stack' }, statsCard(), notifyCard(), shopCard, dataCard)));
+}
+
+function statsCard() {
+  const st = S.data.settings || {};
+  const card = h('div', { class: 'card', id: 'statistik' }, h('div', { class: 'card-head' }, h('h2', {}, icon('calendar'), 'Tage ohne Statistik'),
+    h('button', { class: 'btn small', onclick: () => excludeDialog(null, null, render) }, icon('plus'), 'Zeitraum')));
+  const startIn = h('input', { type: 'date', value: st.tracking_start || EX.firstExpense || '' });
+  startIn.addEventListener('change', async () => {
+    try {
+      const r = await api('PUT', 'settings', { tracking_start: startIn.value || '' });
+      S.data.settings.tracking_start = r.tracking_start; indexData(); render(); toast('Beginn der Erfassung gespeichert');
+    } catch (e) { toast(e.message, { error: true }); }
+  });
+  card.append(h('label', { class: 'field' }, 'Erfassung seit', startIn,
+    h('div', { class: 'field-hint' }, st.tracking_start ? 'Tage davor zählen in keiner Statistik mit.' : `Tage davor zählen nicht mit. Automatisch: Dein erster Eintrag (${EX.firstExpense ? fmtDate(EX.firstExpense) : '–'}).`)));
+  const list = h('div', { class: 'rec-list', style: { marginTop: '10px' } });
+  const periods = S.data.excluded.slice().sort((a, b) => b.day_from.localeCompare(a.day_from));
+  if (!periods.length) list.append(h('p', { class: 'muted', style: { fontSize: '13.5px', margin: '6px 0 0' } }, 'Noch keine Zeiträume. Urlaub & Co. markierst Du am schnellsten unter „Erfassen“: einfach auf einen Tag in der Wochenleiste klicken.'));
+  for (const p of periods) {
+    const n = daysBetween(p.day_from, p.day_to);
+    list.append(h('div', { class: 'rec' },
+      h('div', {}, h('div', { class: 'r-name' }, p.label || 'ausgeschlossen'), h('div', { class: 'r-meta' }, `${fmtRange(p.day_from, p.day_to)} · ${n} ${n === 1 ? 'Tag' : 'Tage'}`)),
+      h('button', { class: 'icon-btn', title: 'Bearbeiten', 'aria-label': 'Zeitraum bearbeiten', onclick: () => excludeDialog(null, null, render, p) }, icon('pencil')),
+      h('button', { class: 'icon-btn danger', title: 'Wieder mitzählen', 'aria-label': 'Zeitraum löschen', onclick: async () => {
+        try { await api('DELETE', `excluded/${p.id}`); S.data.excluded = S.data.excluded.filter(x => x.id !== p.id); indexData(); render(); toast(`„${p.label || 'Zeitraum'}“ zählt wieder mit`); }
+        catch (e) { toast(e.message, { error: true }); }
+      } }, icon('trash-2'))));
+  }
+  card.append(list);
+  return card;
+}
+
+/**
+ * Tag/Woche/Zeitraum aus der Statistik nehmen – oder wieder aufnehmen.
+ * day: angeklickter Tag (oder null), weekStart: Montag der Woche, done: Rückruf nach Änderung, period: zum Bearbeiten
+ */
+function excludeDialog(day, weekStart, done, period) {
+  const r = day ? EX.reason(day) : null;
+  if (r && r.start) {
+    toast(`Tage ${START_LABEL} (${fmtDate(EX.start)}) zählen nie mit – änderbar unter Einstellungen.`, { ms: 6000 });
+    return;
+  }
+  const refresh = () => { indexData(); done && done(); };
+  const create = async b => { const x = await api('POST', 'excluded', b); S.data.excluded.push(x); return x; };
+
+  if (r && r.period) { // angeklickter Tag ist schon ausgeschlossen
+    const p = r.period;
+    openDialog('Wieder mitzählen?', (form, close) => {
+      const single = p.day_from === p.day_to;
+      const run = async fn => { try { await fn(); close(); refresh(); } catch (e) { toast(e.message, { error: true }); } };
+      form.append(h('p', { style: { margin: 0, color: 'var(--ink-2)' } }, `${fmtDateLong(day)} gehört zu „${p.label || 'ausgeschlossen'}“ (${fmtRange(p.day_from, p.day_to)}).`),
+        h('div', { class: 'dlg-actions' },
+          h('button', { type: 'button', class: 'btn left', onclick: close }, 'Abbrechen'),
+          !single ? h('button', { type: 'button', class: 'btn', onclick: () => run(async () => {
+            await api('DELETE', `excluded/${p.id}`);
+            S.data.excluded = S.data.excluded.filter(x => x.id !== p.id);
+            if (p.day_from < day) await create({ day_from: p.day_from, day_to: addDays(day, -1), label: p.label });
+            if (day < p.day_to) await create({ day_from: addDays(day, 1), day_to: p.day_to, label: p.label });
+          }) }, 'Nur diesen Tag') : null,
+          h('button', { type: 'button', class: 'btn primary', onclick: () => run(async () => {
+            await api('DELETE', `excluded/${p.id}`);
+            S.data.excluded = S.data.excluded.filter(x => x.id !== p.id);
+          }) }, single ? 'Wieder mitzählen' : 'Ganzen Zeitraum')));
+    });
+    return;
+  }
+
+  openDialog(period ? 'Zeitraum bearbeiten' : 'Aus der Statistik nehmen', (form, close) => {
+    const fromIn = h('input', { type: 'date', value: period ? period.day_from : day || today() });
+    const toIn = h('input', { type: 'date', value: period ? period.day_to : day || today() });
+    const label = h('input', { type: 'text', value: period ? period.label : 'Urlaub', maxlength: 60, list: 'ex-labels', placeholder: 'z. B. Urlaub, krank, Besuch' });
+    const labels = [...new Set(['Urlaub', 'Krank', 'Besuch', ...S.data.excluded.map(x => x.label).filter(Boolean)])];
+    const hint = h('div', { class: 'field-hint' });
+    const quick = day ? h('div', { class: 'toolbar', style: { margin: 0 } },
+      h('button', { type: 'button', class: 'btn small', onclick: () => { fromIn.value = day; toIn.value = day; } }, `Nur ${weekdayShort(day)}, ${fmtDate(day, { year: false })}`),
+      weekStart ? h('button', { type: 'button', class: 'btn small', onclick: () => { fromIn.value = weekStart; toIn.value = addDays(weekStart, 6); } }, `Ganze KW ${isoWeek(weekStart).week}`) : null) : null;
+    form.append(
+      h('p', { style: { margin: 0, color: 'var(--ink-2)', fontSize: '14px' } }, 'Diese Tage zählen dann bei Durchschnitten, Vergleichen und Diagrammen nicht mit – praktisch für Urlaub oder Wochen, in denen Du nichts eingetragen hast.'),
+      quick,
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Von', fromIn), h('label', { class: 'field' }, 'Bis', toIn)),
+      h('label', { class: 'field' }, 'Bezeichnung', label, h('datalist', { id: 'ex-labels' }, labels.map(l => h('option', { value: l })))),
+      hint,
+      h('div', { class: 'dlg-actions' }, h('button', { type: 'button', class: 'btn', onclick: close }, 'Abbrechen'),
+        h('button', { type: 'submit', class: 'btn primary' }, 'Speichern')));
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      if (!fromIn.value || !toIn.value) { hint.className = 'field-hint error'; hint.textContent = 'Bitte beide Daten angeben.'; return; }
+      const body = { day_from: fromIn.value, day_to: toIn.value, label: label.value.trim() };
+      try {
+        if (period) Object.assign(period, await api('PUT', `excluded/${period.id}`, body));
+        else await create(body);
+        close(); refresh();
+        toast(`„${body.label || 'Zeitraum'}“ wird in der Statistik nicht mitgezählt`);
+      } catch (er) { hint.className = 'field-hint error'; hint.textContent = er.message; }
+    });
+  });
 }
 
 function notifyCard() {
